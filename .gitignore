@@ -38,6 +38,7 @@ Thumbs.db
 /vendor/
 
 # Claude-specific files
+.claude/
 claude_compact_history.txt
 claude_compact_recent.txt
 CLAUDE.md
