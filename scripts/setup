@@ -8,7 +8,10 @@ cd "$(dirname "$0")/.."
 curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 
-# Project deps: dev tools + technical-analysis extras, pinned to uv.lock
+# Project deps: dev tools + technical-analysis extras, pinned to uv.lock.
+# .venv is a named Docker volume; the mount point is created root-owned, so
+# hand it to the current user before uv tries to write into it.
+sudo chown "$(id -u):$(id -g)" .venv
 uv sync --frozen --group dev --group ta
 
 # pre-commit (installed as a standalone uv tool, not a project dep).

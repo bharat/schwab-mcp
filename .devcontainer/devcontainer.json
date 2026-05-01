@@ -44,6 +44,7 @@
   },
   "mounts": [
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind",
-    "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind"
+    "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind",
+    "source=schwab-mcp-venv,target=${containerWorkspaceFolder}/.venv,type=volume"
   ]
 }
