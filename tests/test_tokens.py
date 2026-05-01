@@ -419,3 +419,36 @@ class TestSaveCredentials:
             content = f.read()
 
         assert content.startswith("---")
+
+    def test_writes_discord_token_when_provided(self, tmp_path):
+        path = str(tmp_path / "credentials.yaml")
+
+        tokens.save_credentials(path, "my-id", "my-secret", discord_token="bot-token")
+
+        with open(path) as f:
+            data = yaml.safe_load(f)
+
+        assert data == {
+            "client_id": "my-id",
+            "client_secret": "my-secret",
+            "discord_token": "bot-token",
+        }
+
+    @pytest.mark.parametrize("discord_token", [None, ""])
+    def test_omits_discord_token_when_falsy(self, tmp_path, discord_token):
+        path = str(tmp_path / "credentials.yaml")
+
+        tokens.save_credentials(path, "my-id", "my-secret", discord_token=discord_token)
+
+        with open(path) as f:
+            data = yaml.safe_load(f)
+
+        assert data == {"client_id": "my-id", "client_secret": "my-secret"}
+
+    def test_discord_token_round_trips_through_load(self, tmp_path):
+        path = str(tmp_path / "credentials.yaml")
+
+        tokens.save_credentials(path, "my-id", "my-secret", discord_token="bot-token")
+        loaded = tokens.load_credentials(path)
+
+        assert loaded["discord_token"] == "bot-token"

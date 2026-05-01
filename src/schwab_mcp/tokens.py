@@ -150,7 +150,12 @@ def load_credentials(path: str) -> dict[str, str]:
     return data
 
 
-def save_credentials(path: str, client_id: str, client_secret: str) -> None:
+def save_credentials(
+    path: str,
+    client_id: str,
+    client_secret: str,
+    discord_token: str | None = None,
+) -> None:
     """Write client credentials to a YAML file with restricted permissions.
 
     The file is created with ``0o600`` permissions so that only the owning
@@ -160,13 +165,18 @@ def save_credentials(path: str, client_id: str, client_secret: str) -> None:
         path: Path to the credentials file
         client_id: Schwab client ID
         client_secret: Schwab client secret
+        discord_token: Optional Discord bot token for the approval workflow
     """
     pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+    data: dict[str, str] = {"client_id": client_id, "client_secret": client_secret}
+    if discord_token:
+        data["discord_token"] = discord_token
 
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         yaml.safe_dump(
-            {"client_id": client_id, "client_secret": client_secret},
+            data,
             f,
             default_flow_style=False,
             explicit_start=True,
