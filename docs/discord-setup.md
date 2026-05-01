@@ -34,6 +34,12 @@ To use the account modification tools (placing orders, cancelling orders, etc.) 
 2.  Right-click the text channel where you want the bot to post.
 3.  Click **Copy Channel ID**. This is your `SCHWAB_MCP_DISCORD_CHANNEL_ID`.
 
+> **Make the approval channel private.** Approval requests include the trade
+> details (symbol, side, quantity, price). The `--discord-approver` allow-list
+> only controls whose ✅/❌ reactions count — it does **not** restrict who can
+> read the channel. Create a private channel that only the bot and your
+> approver user(s) can view.
+
 ## 5. Get Your User ID (Approver)
 
 1.  Right-click your own username in Discord.

@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 import functools
 import inspect
+import json
 import logging
 import sys
 import types
@@ -23,6 +24,7 @@ ToolFn = Callable[..., Awaitable[Any]]
 
 _APPROVAL_PROGRESS_INTERVAL = 5.0
 _APPROVAL_WAIT_MESSAGE = "Waiting for reviewer approval…"
+_REDACTED_ARG_NAMES = frozenset({"account_hash"})
 
 
 def _is_context_annotation(annotation: Any) -> bool:
@@ -114,10 +116,14 @@ def _ensure_schwab_context(func: ToolFn) -> ToolFn:
 
 
 def _format_argument(value: Any) -> str:
-    text = repr(value)
-    if len(text) > 256:
-        return f"{text[:253]}..."
-    return text
+    return json.dumps(value, default=repr)
+
+
+def _redact(name: str, value: Any) -> Any:
+    if name not in _REDACTED_ARG_NAMES:
+        return value
+    raw = str(value)
+    return f"…{raw[-4:]}" if len(raw) > 4 else "…"
 
 
 def _wrap_with_approval(func: ToolFn) -> ToolFn:
@@ -157,7 +163,7 @@ def _wrap_with_approval(func: ToolFn) -> ToolFn:
             )
 
         arguments = {
-            name: _format_argument(arg)
+            name: _format_argument(_redact(name, arg))
             for name, arg in bound.arguments.items()
             if name not in ctx_params
         }

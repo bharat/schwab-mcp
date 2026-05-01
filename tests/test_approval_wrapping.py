@@ -1,4 +1,6 @@
 import asyncio
+import datetime
+import json
 from types import SimpleNamespace
 from typing import Any, Awaitable, TypeVar, cast
 
@@ -112,7 +114,7 @@ def test_write_tool_runs_when_approved() -> None:
     assert len(approval_manager.requests) == 1
     request = approval_manager.requests[0]
     assert request.tool_name == "sample_write_tool"
-    assert request.arguments["symbol"] == "'spy'"
+    assert request.arguments["symbol"] == '"spy"'
     assert session.messages == []
 
 
@@ -177,3 +179,146 @@ def test_discord_manager_requires_approvers() -> None:
     )
     with pytest.raises(ValueError):
         DiscordApprovalManager(settings)
+
+
+def test_format_argument_returns_full_json_without_truncation() -> None:
+    big = {"legs": [{"sym": f"SPY {i}", "qty": i} for i in range(50)]}
+    out = _registration._format_argument(big)
+    assert out == json.dumps(big)
+    assert len(out) > 256
+    assert not out.endswith("...")
+
+
+def test_format_argument_handles_non_json_values() -> None:
+    out = _registration._format_argument({"d": datetime.date(2024, 1, 2)})
+    assert "2024" in out
+
+
+def test_redact_masks_account_hash_to_last_four() -> None:
+    assert _registration._redact("account_hash", "ABCDEFGHIJ") == "…GHIJ"
+    assert _registration._redact("account_hash", "abc") == "…"
+    assert _registration._redact("symbol", "ABCDEFGHIJ") == "ABCDEFGHIJ"
+
+
+async def sample_order_tool(ctx: SchwabContext, account_hash: str, symbol: str) -> str:
+    return f"{account_hash}:{symbol}"
+
+
+def test_account_hash_redacted_in_approval_request() -> None:
+    ctx, approval_manager, _, _ = make_ctx(ApprovalDecision.APPROVED)
+    ensured = _registration._ensure_schwab_context(sample_order_tool)
+    tool = _registration._wrap_with_approval(ensured)
+
+    result = await_result(tool(ctx, "ABCD1234WXYZ", "AAPL"))
+
+    assert result == "ABCD1234WXYZ:AAPL"
+    request = approval_manager.requests[0]
+    assert request.arguments["account_hash"] == '"\\u2026WXYZ"'
+    assert request.arguments["symbol"] == '"AAPL"'
+
+
+def test_discord_format_arguments_wraps_in_code_fence() -> None:
+    out = DiscordApprovalManager._format_arguments({"symbol": '"AAPL"', "qty": "10"})
+    assert out.startswith("```\n")
+    assert out.endswith("\n```")
+    assert 'symbol = "AAPL"' in out
+    assert "qty = 10" in out
+
+
+def test_discord_format_arguments_sanitizes_backticks() -> None:
+    out = DiscordApprovalManager._format_arguments(
+        {"symbol": '"AAPL ``` [evil](https://x)"'}
+    )
+    assert out.count("```") == 2
+    assert "`" not in out.removeprefix("```").removesuffix("```")
+
+
+def test_discord_format_arguments_never_truncates() -> None:
+    big = {"spec": "x" * 2000}
+    out = DiscordApprovalManager._format_arguments(big)
+    assert "x" * 2000 in out
+    assert not out.endswith("...")
+
+
+def _make_discord_manager() -> DiscordApprovalManager:
+    return DiscordApprovalManager(
+        DiscordApprovalSettings(
+            token="token",
+            channel_id=123,
+            approver_ids=frozenset({1}),
+        )
+    )
+
+
+def test_discord_finalize_message_omits_arguments() -> None:
+    manager = _make_discord_manager()
+
+    captured: dict[str, Any] = {}
+
+    class FakeMessage:
+        async def edit(self, *, embed: Any) -> None:
+            captured["embed"] = embed
+
+    request = ApprovalRequest(
+        id="approval-1",
+        tool_name="place_equity_order",
+        request_id="req-1",
+        client_id=None,
+        arguments={"account_hash": '"…WXYZ"', "symbol": '"AAPL"'},
+    )
+
+    await_result(
+        manager._finalize_message(
+            cast(Any, FakeMessage()),
+            request,
+            ApprovalDecision.APPROVED,
+            actor=None,
+            reason=None,
+        )
+    )
+
+    embed = captured["embed"]
+    field_names = [f.name for f in embed.fields]
+    assert "Arguments" not in field_names
+
+
+def test_discord_require_auto_denies_when_arguments_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _make_discord_manager()
+
+    sent: list[Any] = []
+
+    class FakeMessage:
+        id = 999
+
+        async def add_reaction(self, _: str) -> None:
+            raise AssertionError("reactions must not be added on auto-deny path")
+
+    class FakeChannel:
+        async def send(self, *, embed: Any) -> Any:
+            sent.append(embed)
+            return FakeMessage()
+
+    async def fake_start(self: DiscordApprovalManager) -> None:
+        return None
+
+    async def fake_ensure_channel(self: DiscordApprovalManager) -> Any:
+        return FakeChannel()
+
+    monkeypatch.setattr(DiscordApprovalManager, "start", fake_start)
+    monkeypatch.setattr(DiscordApprovalManager, "_ensure_channel", fake_ensure_channel)
+
+    request = ApprovalRequest(
+        id="approval-2",
+        tool_name="place_option_combo_order",
+        request_id="req-2",
+        client_id=None,
+        arguments={"legs": "x" * 1200},
+    )
+
+    decision = await_result(manager.require(request))
+
+    assert decision is ApprovalDecision.DENIED
+    assert len(sent) == 1
+    assert "auto-denied" in sent[0].title.lower()
