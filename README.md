@@ -32,31 +32,33 @@ pip install git+https://github.com/jkoelker/schwab-mcp.git
 
 ### Authentication
 
-Before running the server, you must authenticate with Schwab to generate a token file.
+First, store your Schwab credentials locally. You'll be prompted for the
+client secret (and optional Discord bot token) without echoing them to the
+terminal:
 
 ```bash
-# If installed via uv tool
-schwab-mcp auth --client-id YOUR_KEY --client-secret YOUR_SECRET --callback-url https://127.0.0.1:8182
-
-# If running from source
-uv run schwab-mcp auth --client-id YOUR_KEY --client-secret YOUR_SECRET --callback-url https://127.0.0.1:8182
+schwab-mcp save-credentials   # prompts for Client ID, Client Secret (hidden), Discord token (hidden, optional)
 ```
 
-This will open a browser window for you to log in to Schwab. Once complete, a token will be saved to `~/.local/share/schwab-mcp/token.yaml`.
+Then run the OAuth flow to generate a token file:
+
+```bash
+schwab-mcp auth
+```
+
+This will open a browser window for you to log in to Schwab. Once complete,
+a token will be saved to `~/.local/share/schwab-mcp/token.yaml`.
 
 ### Running the Server
 
 Start the MCP server to expose the tools to your MCP client.
 
 ```bash
-# Basic Read-Only Mode (Safest)
-schwab-mcp server --client-id YOUR_KEY --client-secret YOUR_SECRET
+# Basic Read-Only Mode (Safest) — credentials read from save-credentials file
+schwab-mcp server
 
 # With Trading Enabled (Requires Discord Approval)
 schwab-mcp server \
-  --client-id YOUR_KEY \
-  --client-secret YOUR_SECRET \
-  --discord-token BOT_TOKEN \
   --discord-channel-id CHANNEL_ID \
   --discord-approver YOUR_USER_ID
 ```
@@ -67,11 +69,17 @@ schwab-mcp server \
 
 You can configure the server using CLI flags or Environment Variables.
 
+> **Avoid passing `--client-secret` or `--discord-token` on the command
+> line** — command-line arguments are visible to other processes on your
+> machine via `ps`. Prefer `schwab-mcp save-credentials` or the
+> environment variables below.
+
 | Flag | Env Variable | Description |
 |------|--------------|-------------|
 | `--client-id` | `SCHWAB_CLIENT_ID` | **Required**. Schwab App Key. |
 | `--client-secret` | `SCHWAB_CLIENT_SECRET` | **Required**. Schwab App Secret. |
 | `--callback-url` | `SCHWAB_CALLBACK_URL` | Redirect URL (default: `https://127.0.0.1:8182`). |
+| `--discord-token` | `SCHWAB_MCP_DISCORD_TOKEN` | Discord bot token for trade approvals. |
 | `--token-path` | N/A | Path to save/load token (default: `~/.local/share/...`). |
 | `--jesus-take-the-wheel`| N/A | **DANGER**. Bypasses Discord approval for trades. |
 | `--no-technical-tools` | N/A | Disables technical analysis tools (SMA, RSI, etc.). |

@@ -203,6 +203,7 @@ def server(
     creds = tokens.load_credentials(tokens.credentials_path(APP_NAME))
     client_id = client_id or creds.get("client_id")
     client_secret = client_secret or creds.get("client_secret")
+    discord_token = discord_token or creds.get("discord_token")
     if not client_id or not client_secret:
         send_error_response(
             "client-id and client-secret are required. "
@@ -346,12 +347,22 @@ def server(
     "--client-secret",
     type=str,
     prompt="Schwab Client Secret",
+    hide_input=True,
     help="Schwab Client Secret",
 )
-def save_credentials(client_id: str, client_secret: str) -> None:
+@click.option(
+    "--discord-token",
+    type=str,
+    prompt="Discord Bot Token (optional, press Enter to skip)",
+    hide_input=True,
+    default="",
+    show_default=False,
+    help="Discord bot token for the approval workflow (optional)",
+)
+def save_credentials(client_id: str, client_secret: str, discord_token: str) -> None:
     """Save Schwab client credentials to a local file."""
     path = tokens.credentials_path(APP_NAME)
-    tokens.save_credentials(path, client_id, client_secret)
+    tokens.save_credentials(path, client_id, client_secret, discord_token or None)
     click.echo(f"Credentials saved to: {path}")
 
 

@@ -207,7 +207,7 @@ class TestSaveCredentialsCommand:
         result = runner.invoke(
             cli.cli,
             ["save-credentials"],
-            input="my-client-id\nmy-client-secret\n",
+            input="my-client-id\nmy-client-secret\n\n",
             catch_exceptions=False,
         )
 
@@ -220,6 +220,46 @@ class TestSaveCredentialsCommand:
         assert data == {
             "client_id": "my-client-id",
             "client_secret": "my-client-secret",
+        }
+
+    def test_secret_prompts_do_not_echo(self, monkeypatch, tmp_path):
+        creds_path = tmp_path / "credentials.yaml"
+        monkeypatch.setattr(cli.tokens, "credentials_path", lambda app: str(creds_path))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli.cli,
+            ["save-credentials"],
+            input="visible-id\nhidden-secret\nhidden-discord-token\n",
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert "visible-id" in result.output
+        assert "hidden-secret" not in result.output
+        assert "hidden-discord-token" not in result.output
+
+    def test_saves_discord_token_when_prompted(self, monkeypatch, tmp_path):
+        creds_path = tmp_path / "credentials.yaml"
+        monkeypatch.setattr(cli.tokens, "credentials_path", lambda app: str(creds_path))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli.cli,
+            ["save-credentials"],
+            input="my-client-id\nmy-client-secret\nmy-discord-token\n",
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+
+        with open(creds_path) as f:
+            data = yaml.safe_load(f)
+
+        assert data == {
+            "client_id": "my-client-id",
+            "client_secret": "my-client-secret",
+            "discord_token": "my-discord-token",
         }
 
     def test_saves_credentials_with_flags(self, monkeypatch, tmp_path):
@@ -235,6 +275,8 @@ class TestSaveCredentialsCommand:
                 "flag-id",
                 "--client-secret",
                 "flag-secret",
+                "--discord-token",
+                "",
             ],
             catch_exceptions=False,
         )
@@ -253,9 +295,93 @@ class TestSaveCredentialsCommand:
         runner = CliRunner()
         runner.invoke(
             cli.cli,
-            ["save-credentials", "--client-id", "id", "--client-secret", "secret"],
+            [
+                "save-credentials",
+                "--client-id",
+                "id",
+                "--client-secret",
+                "secret",
+                "--discord-token",
+                "",
+            ],
             catch_exceptions=False,
         )
 
         mode = os.stat(creds_path).st_mode & 0o777
         assert mode == 0o600
+
+
+class TestServerDiscordTokenCredentialsFile:
+    def _patch_server(self, monkeypatch, captured: dict[str, Any]) -> None:
+        monkeypatch.setattr(cli, "AsyncClient", FakeAsyncClient)
+        monkeypatch.setattr(
+            cli.tokens, "Manager", lambda p: type("M", (), {"path": p})()
+        )
+        monkeypatch.setattr(
+            cli.schwab_auth, "easy_client", lambda **kw: FakeAsyncClient()
+        )
+
+        class FakeDiscordSettings:
+            def __init__(self, **kwargs):
+                captured["discord_settings"] = kwargs
+
+        class FakeDiscordManager:
+            authorized_user_ids = staticmethod(
+                lambda ids: frozenset(ids) if ids else frozenset()
+            )
+
+            def __init__(self, settings):
+                captured["discord_manager_settings"] = settings
+
+        monkeypatch.setattr(cli, "DiscordApprovalSettings", FakeDiscordSettings)
+        monkeypatch.setattr(cli, "DiscordApprovalManager", FakeDiscordManager)
+        monkeypatch.setattr(
+            cli,
+            "SchwabMCPServer",
+            lambda *a, **kw: type("S", (), {"run": staticmethod(lambda: None)})(),
+        )
+        monkeypatch.setattr(cli.anyio, "run", lambda func, **kw: None)
+
+    def test_server_reads_discord_token_from_credentials_file(
+        self, monkeypatch, tmp_path
+    ):
+        captured: dict[str, Any] = {}
+        self._patch_server(monkeypatch, captured)
+
+        creds_path = tmp_path / "credentials.yaml"
+        with open(creds_path, "w") as f:
+            yaml.safe_dump(
+                {
+                    "client_id": "file-id",
+                    "client_secret": "file-secret",
+                    "discord_token": "file-discord-token",
+                },
+                f,
+            )
+
+        monkeypatch.setattr(cli.tokens, "credentials_path", lambda app: str(creds_path))
+        for var in (
+            "SCHWAB_CLIENT_ID",
+            "SCHWAB_CLIENT_SECRET",
+            "SCHWAB_MCP_DISCORD_TOKEN",
+            "SCHWAB_MCP_DISCORD_APPROVERS",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli.cli,
+            [
+                "server",
+                "--token-path",
+                str(tmp_path / "token.yaml"),
+                "--discord-channel-id",
+                "12345",
+                "--discord-approver",
+                "67890",
+            ],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert captured["discord_settings"]["token"] == "file-discord-token"
