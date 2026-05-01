@@ -531,23 +531,25 @@ class TestPlaceOneCancelsOtherOrder:
     def place_order_client(self, place_order_client_factory, account_hash, order_id):
         return place_order_client_factory(account_hash=account_hash, order_id=order_id)
 
-    def test_places_oco_order_with_two_children(
+    def test_builds_oco_from_typed_scalars(
         self, place_order_client, account_hash, order_id
     ):
         ctx = make_ctx(place_order_client)
 
-        first_spec = run(
-            orders.build_equity_order_spec("SPY", 100, "SELL", "LIMIT", price=160.00)
-        )
-        second_spec = run(
-            orders.build_equity_order_spec(
-                "SPY", 100, "SELL", "STOP", stop_price=140.00
-            )
-        )
-
         result = run(
             orders.place_one_cancels_other_order(
-                ctx, account_hash, first_spec, second_spec
+                ctx,
+                account_hash,
+                leg1_symbol="SPY",
+                leg1_quantity=100,
+                leg1_instruction="SELL",
+                leg1_order_type="LIMIT",
+                leg2_symbol="SPY",
+                leg2_quantity=100,
+                leg2_instruction="SELL",
+                leg2_order_type="STOP",
+                leg1_price=160.00,
+                leg2_stop_price=140.00,
             )
         )
 
@@ -559,8 +561,64 @@ class TestPlaceOneCancelsOtherOrder:
 
         assert order_spec["orderStrategyType"] == "OCO"
         assert len(order_spec["childOrderStrategies"]) == 2
-        assert order_spec["childOrderStrategies"][0]["orderType"] == "LIMIT"
-        assert order_spec["childOrderStrategies"][1]["orderType"] == "STOP"
+
+        leg1 = order_spec["childOrderStrategies"][0]
+        leg2 = order_spec["childOrderStrategies"][1]
+        assert leg1["orderType"] == "LIMIT"
+        assert leg1["orderLegCollection"][0]["instrument"]["symbol"] == "SPY"
+        assert leg1["orderLegCollection"][0]["instruction"] == "SELL"
+        assert leg1["orderLegCollection"][0]["quantity"] == 100
+        assert leg2["orderType"] == "STOP"
+        assert leg2["orderLegCollection"][0]["instrument"]["symbol"] == "SPY"
+
+    def test_invalid_leg_order_type_raises(self, place_order_client, account_hash):
+        ctx = make_ctx(place_order_client)
+
+        with pytest.raises(ValueError, match="Invalid order_type: TRAILING"):
+            run(
+                orders.place_one_cancels_other_order(
+                    ctx,
+                    account_hash,
+                    leg1_symbol="SPY",
+                    leg1_quantity=100,
+                    leg1_instruction="SELL",
+                    leg1_order_type="TRAILING",
+                    leg2_symbol="SPY",
+                    leg2_quantity=100,
+                    leg2_instruction="SELL",
+                    leg2_order_type="STOP",
+                    leg2_stop_price=140.00,
+                )
+            )
+
+    def test_applies_session_and_duration_to_both_legs(
+        self, place_order_client, account_hash
+    ):
+        ctx = make_ctx(place_order_client)
+
+        run(
+            orders.place_one_cancels_other_order(
+                ctx,
+                account_hash,
+                leg1_symbol="SPY",
+                leg1_quantity=10,
+                leg1_instruction="SELL",
+                leg1_order_type="LIMIT",
+                leg2_symbol="SPY",
+                leg2_quantity=10,
+                leg2_instruction="SELL",
+                leg2_order_type="STOP",
+                leg1_price=160.00,
+                leg2_stop_price=140.00,
+                session="SEAMLESS",
+                duration="GOOD_TILL_CANCEL",
+            )
+        )
+
+        order_spec = place_order_client.captured["kwargs"]["order_spec"]
+        for child in order_spec["childOrderStrategies"]:
+            assert child["session"] == "SEAMLESS"
+            assert child["duration"] == "GOOD_TILL_CANCEL"
 
 
 class TestPlaceFirstTriggersSecondOrder:
@@ -580,21 +638,25 @@ class TestPlaceFirstTriggersSecondOrder:
     def place_order_client(self, place_order_client_factory, account_hash, order_id):
         return place_order_client_factory(account_hash=account_hash, order_id=order_id)
 
-    def test_places_trigger_order_with_child(
+    def test_builds_trigger_from_typed_scalars(
         self, place_order_client, account_hash, order_id
     ):
         ctx = make_ctx(place_order_client)
 
-        entry_spec = run(
-            orders.build_equity_order_spec("SPY", 100, "BUY", "LIMIT", price=145.00)
-        )
-        exit_spec = run(
-            orders.build_equity_order_spec("SPY", 100, "SELL", "LIMIT", price=160.00)
-        )
-
         result = run(
             orders.place_first_triggers_second_order(
-                ctx, account_hash, entry_spec, exit_spec
+                ctx,
+                account_hash,
+                leg1_symbol="SPY",
+                leg1_quantity=100,
+                leg1_instruction="BUY",
+                leg1_order_type="LIMIT",
+                leg2_symbol="SPY",
+                leg2_quantity=100,
+                leg2_instruction="SELL",
+                leg2_order_type="LIMIT",
+                leg1_price=145.00,
+                leg2_price=160.00,
             )
         )
 
@@ -605,12 +667,32 @@ class TestPlaceFirstTriggersSecondOrder:
         order_spec = captured["kwargs"]["order_spec"]
 
         assert order_spec["orderStrategyType"] == "TRIGGER"
-        assert "childOrderStrategies" in order_spec
-        assert len(order_spec["childOrderStrategies"]) == 1
-
         assert order_spec["orderLegCollection"][0]["instruction"] == "BUY"
+        assert order_spec["orderLegCollection"][0]["instrument"]["symbol"] == "SPY"
+
+        assert len(order_spec["childOrderStrategies"]) == 1
         child = order_spec["childOrderStrategies"][0]
         assert child["orderLegCollection"][0]["instruction"] == "SELL"
+        assert child["orderLegCollection"][0]["instrument"]["symbol"] == "SPY"
+
+    def test_invalid_leg_instruction_raises(self, place_order_client, account_hash):
+        ctx = make_ctx(place_order_client)
+
+        with pytest.raises(ValueError, match="Invalid instruction"):
+            run(
+                orders.place_first_triggers_second_order(
+                    ctx,
+                    account_hash,
+                    leg1_symbol="SPY",
+                    leg1_quantity=100,
+                    leg1_instruction="SELL_SHORT",
+                    leg1_order_type="MARKET",
+                    leg2_symbol="SPY",
+                    leg2_quantity=100,
+                    leg2_instruction="SELL",
+                    leg2_order_type="MARKET",
+                )
+            )
 
 
 class TestPlaceOptionComboOrder:
