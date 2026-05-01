@@ -11,7 +11,10 @@ export PATH="$HOME/.local/bin:$PATH"
 # Project deps: dev tools + technical-analysis extras, pinned to uv.lock
 uv sync --frozen --group dev --group ta
 
-# pre-commit (installed as a standalone uv tool, not a project dep)
+# pre-commit (installed as a standalone uv tool, not a project dep).
+# pre-commit refuses to install if core.hooksPath is set; a bind-mounted
+# .git/config often carries an absolute host path here. Clear it at repo scope.
+git config --local --unset-all core.hooksPath 2>/dev/null || true
 uv tool install pre-commit
 pre-commit install
 
