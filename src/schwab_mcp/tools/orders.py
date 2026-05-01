@@ -3,7 +3,6 @@
 from collections.abc import Callable
 from typing import Annotated, Any, cast
 
-import copy
 from mcp.server.fastmcp import FastMCP
 from schwab.utils import (
     AccountHashMismatchException,
@@ -559,27 +558,74 @@ async def build_option_order_spec(
 async def place_one_cancels_other_order(
     ctx: SchwabContext,
     account_hash: Annotated[str, "Account hash for the Schwab account"],
-    first_order_spec: Annotated[
-        dict, "First order specification (dict from build_equity/option_order_spec)"
+    leg1_symbol: Annotated[str, "Stock symbol for the first leg"],
+    leg1_quantity: Annotated[int, "Number of shares for the first leg"],
+    leg1_instruction: Annotated[str, "BUY or SELL for the first leg"],
+    leg1_order_type: Annotated[
+        str, "Order type for the first leg: MARKET, LIMIT, STOP, or STOP_LIMIT"
     ],
-    second_order_spec: Annotated[
-        dict, "Second order specification (dict from build_equity/option_order_spec)"
+    leg2_symbol: Annotated[str, "Stock symbol for the second leg"],
+    leg2_quantity: Annotated[int, "Number of shares for the second leg"],
+    leg2_instruction: Annotated[str, "BUY or SELL for the second leg"],
+    leg2_order_type: Annotated[
+        str, "Order type for the second leg: MARKET, LIMIT, STOP, or STOP_LIMIT"
     ],
+    leg1_price: Annotated[
+        float | None, "First-leg limit price (required for LIMIT/STOP_LIMIT)"
+    ] = None,
+    leg1_stop_price: Annotated[
+        float | None, "First-leg stop price (required for STOP/STOP_LIMIT)"
+    ] = None,
+    leg2_price: Annotated[
+        float | None, "Second-leg limit price (required for LIMIT/STOP_LIMIT)"
+    ] = None,
+    leg2_stop_price: Annotated[
+        float | None, "Second-leg stop price (required for STOP/STOP_LIMIT)"
+    ] = None,
+    session: Annotated[
+        str | None, "Trading session: NORMAL (default), AM, PM, or SEAMLESS"
+    ] = "NORMAL",
+    duration: Annotated[
+        str | None, "Order duration: DAY (default) or GOOD_TILL_CANCEL"
+    ] = "DAY",
 ) -> JSONType:
     """
-    Creates OCO order: execution of one cancels the other. Use for take-profit/stop-loss pairs.
-    Params: account_hash, first_order_spec (dict), second_order_spec (dict).
-    *Use build_equity_order_spec() or build_option_order_spec() to create the required spec dictionaries.* *Write operation.*
+    Creates an equity OCO order: execution of one leg cancels the other. Use for take-profit/stop-loss pairs.
+    Each leg is built server-side from typed scalars (same validation as place_equity_order).
+    Params: account_hash, leg1_* and leg2_* (symbol, quantity, instruction BUY/SELL, order_type MARKET/LIMIT/STOP/STOP_LIMIT).
+    Optional/Conditional: leg*_price (for LIMIT/STOP_LIMIT), leg*_stop_price (for STOP/STOP_LIMIT), session (default NORMAL), duration (default DAY).
+    *Write operation.*
     """
-    # Manually construct the OCO order dictionary structure
-    # This structure is correct according to schwab-py's oco_builder
-    oco_order_spec = {
-        "orderStrategyType": "OCO",
-        "childOrderStrategies": [first_order_spec, second_order_spec],
-    }
-
-    # Place the order
     client = ctx.orders
+
+    leg1_builder = _apply_order_settings(
+        _build_equity_order_spec(
+            leg1_symbol,
+            leg1_quantity,
+            leg1_instruction,
+            leg1_order_type,
+            price=leg1_price,
+            stop_price=leg1_stop_price,
+        ),
+        session,
+        duration,
+    )
+    leg2_builder = _apply_order_settings(
+        _build_equity_order_spec(
+            leg2_symbol,
+            leg2_quantity,
+            leg2_instruction,
+            leg2_order_type,
+            price=leg2_price,
+            stop_price=leg2_stop_price,
+        ),
+        session,
+        duration,
+    )
+
+    oco_order_spec = cast(
+        dict[str, Any], oco_builder(leg1_builder, leg2_builder).build()
+    )
 
     return await call(
         client.place_order,
@@ -592,57 +638,79 @@ async def place_one_cancels_other_order(
 async def place_first_triggers_second_order(
     ctx: SchwabContext,
     account_hash: Annotated[str, "Account hash for the Schwab account"],
-    first_order_spec: Annotated[
-        dict,
-        "First (primary) order specification (dict from build_equity/option_order_spec)",
+    leg1_symbol: Annotated[str, "Stock symbol for the primary (first) leg"],
+    leg1_quantity: Annotated[int, "Number of shares for the primary leg"],
+    leg1_instruction: Annotated[str, "BUY or SELL for the primary leg"],
+    leg1_order_type: Annotated[
+        str, "Order type for the primary leg: MARKET, LIMIT, STOP, or STOP_LIMIT"
     ],
-    second_order_spec: Annotated[
-        dict,
-        "Second (triggered) order specification (dict from build_equity/option_order_spec)",
+    leg2_symbol: Annotated[str, "Stock symbol for the triggered (second) leg"],
+    leg2_quantity: Annotated[int, "Number of shares for the triggered leg"],
+    leg2_instruction: Annotated[str, "BUY or SELL for the triggered leg"],
+    leg2_order_type: Annotated[
+        str, "Order type for the triggered leg: MARKET, LIMIT, STOP, or STOP_LIMIT"
     ],
+    leg1_price: Annotated[
+        float | None, "Primary-leg limit price (required for LIMIT/STOP_LIMIT)"
+    ] = None,
+    leg1_stop_price: Annotated[
+        float | None, "Primary-leg stop price (required for STOP/STOP_LIMIT)"
+    ] = None,
+    leg2_price: Annotated[
+        float | None, "Triggered-leg limit price (required for LIMIT/STOP_LIMIT)"
+    ] = None,
+    leg2_stop_price: Annotated[
+        float | None, "Triggered-leg stop price (required for STOP/STOP_LIMIT)"
+    ] = None,
+    session: Annotated[
+        str | None, "Trading session: NORMAL (default), AM, PM, or SEAMLESS"
+    ] = "NORMAL",
+    duration: Annotated[
+        str | None, "Order duration: DAY (default) or GOOD_TILL_CANCEL"
+    ] = "DAY",
 ) -> JSONType:
     """
-    Creates conditional order: second order placed only after first executes. Use for activating exits after entry.
-    Params: account_hash, first_order_spec (dict), second_order_spec (dict).
-    *Use build_equity_order_spec() or build_option_order_spec() to create the required spec dictionaries.* *Write operation.*
+    Creates an equity conditional order: the second leg is placed only after the first executes.
+    Each leg is built server-side from typed scalars (same validation as place_equity_order).
+    Params: account_hash, leg1_* (primary) and leg2_* (triggered) — symbol, quantity, instruction BUY/SELL, order_type MARKET/LIMIT/STOP/STOP_LIMIT.
+    Optional/Conditional: leg*_price (for LIMIT/STOP_LIMIT), leg*_stop_price (for STOP/STOP_LIMIT), session (default NORMAL), duration (default DAY).
+    *Write operation.*
     """
-    # Use the schwab-py library's construct_repeat_order to convert dicts to OrderBuilder objects,
-    # then use the trigger_builder helper (same approach as place_bracket_order)
-    from schwab.contrib.orders import construct_repeat_order
-
     client = ctx.orders
 
-    # Deep copy to avoid modifying the original specs
-    first_spec_copy = copy.deepcopy(first_order_spec)
-    second_spec_copy = copy.deepcopy(second_order_spec)
+    leg1_builder = _apply_order_settings(
+        _build_equity_order_spec(
+            leg1_symbol,
+            leg1_quantity,
+            leg1_instruction,
+            leg1_order_type,
+            price=leg1_price,
+            stop_price=leg1_stop_price,
+        ),
+        session,
+        duration,
+    )
+    leg2_builder = _apply_order_settings(
+        _build_equity_order_spec(
+            leg2_symbol,
+            leg2_quantity,
+            leg2_instruction,
+            leg2_order_type,
+            price=leg2_price,
+            stop_price=leg2_stop_price,
+        ),
+        session,
+        duration,
+    )
 
-    # Add orderLegType to each leg (required by construct_repeat_order)
-    # Detect type based on instrument assetType
-    for leg in first_spec_copy.get("orderLegCollection", []):
-        if "orderLegType" not in leg:
-            asset_type = leg.get("instrument", {}).get("assetType", "EQUITY")
-            leg["orderLegType"] = asset_type
+    trigger_order_spec = cast(
+        dict[str, Any], trigger_builder(leg1_builder, leg2_builder).build()
+    )
 
-    for leg in second_spec_copy.get("orderLegCollection", []):
-        if "orderLegType" not in leg:
-            asset_type = leg.get("instrument", {}).get("assetType", "EQUITY")
-            leg["orderLegType"] = asset_type
-
-    # Convert dict specs to OrderBuilder objects using schwab-py's construct_repeat_order
-    first_order_builder = construct_repeat_order(first_spec_copy)
-    second_order_builder = construct_repeat_order(second_spec_copy)
-
-    # Use the schwab-py trigger_builder to create the TRIGGER order (same as bracket order does)
-    trigger_order_builder = trigger_builder(first_order_builder, second_order_builder)
-
-    # Build the final order dictionary
-    trigger_order_dict = cast(dict[str, Any], trigger_order_builder.build())
-
-    # Place the order
     return await call(
         client.place_order,
         account_hash=account_hash,
-        order_spec=trigger_order_dict,
+        order_spec=trigger_order_spec,
         response_handler=_order_response_handler(ctx, account_hash),
     )
 
