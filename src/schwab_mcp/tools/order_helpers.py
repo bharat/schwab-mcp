@@ -11,6 +11,19 @@ from schwab.orders.common import (
 from schwab.orders.generic import OrderBuilder
 
 
+def _price_str(price: float) -> str:
+    """Format a price the way schwab-py used to before deprecating float input.
+
+    schwab-py's ``set_price``/``set_stop_price`` warn on floats and will drop
+    support; passing a string skips their truncation. Replicate that
+    truncation here so the wire format stays identical: 4 decimals for
+    sub-dollar prices, 2 decimals otherwise, truncated (not rounded).
+    """
+    if price != 0.0 and abs(price) < 1:
+        return f"{int(price * 10000) / 10000.0:.4f}"
+    return f"{int(price * 100) / 100.0:.2f}"
+
+
 def __equity_base_builder(session=Session.NORMAL, duration=Duration.DAY):
     """
     Returns a base OrderBuilder for equity orders with common settings.
@@ -54,7 +67,7 @@ def equity_buy_limit(
     return (
         __equity_base_builder(session, duration)
         .set_order_type(OrderType.LIMIT)
-        .set_price(price)
+        .set_price(_price_str(price))
         .add_equity_leg(EquityInstruction.BUY, symbol, quantity)
     )
 
@@ -68,7 +81,7 @@ def equity_sell_limit(
     return (
         __equity_base_builder(session, duration)
         .set_order_type(OrderType.LIMIT)
-        .set_price(price)
+        .set_price(_price_str(price))
         .add_equity_leg(EquityInstruction.SELL, symbol, quantity)
     )
 
@@ -82,7 +95,7 @@ def equity_buy_stop(
     return (
         __equity_base_builder(session, duration)
         .set_order_type(OrderType.STOP)
-        .set_stop_price(stop_price)
+        .set_stop_price(_price_str(stop_price))
         .add_equity_leg(EquityInstruction.BUY, symbol, quantity)
     )
 
@@ -96,7 +109,7 @@ def equity_sell_stop(
     return (
         __equity_base_builder(session, duration)
         .set_order_type(OrderType.STOP)
-        .set_stop_price(stop_price)
+        .set_stop_price(_price_str(stop_price))
         .add_equity_leg(EquityInstruction.SELL, symbol, quantity)
     )
 
@@ -115,8 +128,8 @@ def equity_buy_stop_limit(
     return (
         __equity_base_builder(session, duration)
         .set_order_type(OrderType.STOP_LIMIT)
-        .set_stop_price(stop_price)
-        .set_price(limit_price)
+        .set_stop_price(_price_str(stop_price))
+        .set_price(_price_str(limit_price))
         .add_equity_leg(EquityInstruction.BUY, symbol, quantity)
     )
 
@@ -135,8 +148,8 @@ def equity_sell_stop_limit(
     return (
         __equity_base_builder(session, duration)
         .set_order_type(OrderType.STOP_LIMIT)
-        .set_stop_price(stop_price)
-        .set_price(limit_price)
+        .set_stop_price(_price_str(stop_price))
+        .set_price(_price_str(limit_price))
         .add_equity_leg(EquityInstruction.SELL, symbol, quantity)
     )
 
@@ -214,7 +227,7 @@ def option_buy_to_open_limit(
     return (
         __option_base_builder(session, duration)
         .set_order_type(OrderType.LIMIT)
-        .set_price(price)
+        .set_price(_price_str(price))
         .add_option_leg(OptionInstruction.BUY_TO_OPEN, symbol, quantity)
     )
 
@@ -228,7 +241,7 @@ def option_sell_to_open_limit(
     return (
         __option_base_builder(session, duration)
         .set_order_type(OrderType.LIMIT)
-        .set_price(price)
+        .set_price(_price_str(price))
         .add_option_leg(OptionInstruction.SELL_TO_OPEN, symbol, quantity)
     )
 
@@ -242,7 +255,7 @@ def option_buy_to_close_limit(
     return (
         __option_base_builder(session, duration)
         .set_order_type(OrderType.LIMIT)
-        .set_price(price)
+        .set_price(_price_str(price))
         .add_option_leg(OptionInstruction.BUY_TO_CLOSE, symbol, quantity)
     )
 
@@ -256,7 +269,7 @@ def option_sell_to_close_limit(
     return (
         __option_base_builder(session, duration)
         .set_order_type(OrderType.LIMIT)
-        .set_price(price)
+        .set_price(_price_str(price))
         .add_option_leg(OptionInstruction.SELL_TO_CLOSE, symbol, quantity)
     )
 
