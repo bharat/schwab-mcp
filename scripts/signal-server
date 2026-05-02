@@ -7,11 +7,16 @@ set -euo pipefail
 
 : "${SCHWAB_MCP_SIGNAL_ACCOUNT:?set SCHWAB_MCP_SIGNAL_ACCOUNT to the bot E.164 number}"
 : "${SCHWAB_MCP_SIGNAL_APPROVERS:?set SCHWAB_MCP_SIGNAL_APPROVERS to your E.164 number}"
-API_URL=${SCHWAB_MCP_SIGNAL_API_URL:-http://host.docker.internal:8080}
 
-exec devcontainer exec --workspace-folder . -- \
-    uv run schwab-mcp server \
-        --signal-api-url "$API_URL" \
-        --signal-account "$SCHWAB_MCP_SIGNAL_ACCOUNT" \
-        --signal-approver "$SCHWAB_MCP_SIGNAL_APPROVERS" \
-        "$@"
+# Source .env again inside the container so SCHWAB_CLIENT_ID / _SECRET reach
+# click via envvar without ever appearing in argv. The Signal flags are not
+# secrets, so passing them on the inner argv is fine.
+exec devcontainer exec --workspace-folder . bash -lc "
+    set -a; [ -f .env ] && source .env; set +a
+    exec uv run schwab-mcp server \
+        --token-path .token.yaml \
+        --signal-api-url '${SCHWAB_MCP_SIGNAL_API_URL:-http://host.docker.internal:8080}' \
+        --signal-account '$SCHWAB_MCP_SIGNAL_ACCOUNT' \
+        --signal-approver '$SCHWAB_MCP_SIGNAL_APPROVERS' \
+        $*
+"
