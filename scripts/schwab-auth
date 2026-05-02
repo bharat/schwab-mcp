@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Run the Schwab OAuth flow from inside the devcontainer using the manual
+# (paste-the-redirect-URL) path, so no local HTTPS listener is needed.
+# Runs on the HOST; the CLI runs in the container.
+
+set -euo pipefail
+
+# .env is bind-mounted into the container; source it there so SCHWAB_CLIENT_ID
+# and SCHWAB_CLIENT_SECRET reach click via envvar without ever appearing in argv.
+exec devcontainer exec --workspace-folder . bash -lc '
+    set -a; [ -f .env ] && source .env; set +a
+    exec uv run schwab-mcp auth --manual --token-path .token.yaml
+'

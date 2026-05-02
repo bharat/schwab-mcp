@@ -49,6 +49,8 @@ info/
 # Environment files
 .env
 .env.local
+.token.yaml
+.token.json
 
 # Python
 __pycache__/
