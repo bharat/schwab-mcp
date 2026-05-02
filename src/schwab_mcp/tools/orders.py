@@ -886,6 +886,7 @@ async def place_option_combo_order(
     # Set order type and net price
     builder = builder.set_order_type(order_type.upper())
     if price is not None:
+        # net debit/credit as positive number
         builder = builder.set_price(_price_str(price))
 
     for leg in legs:

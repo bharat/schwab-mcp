@@ -1,6 +1,8 @@
+import warnings
 from typing import Any, cast
 
 import pytest
+from schwab_mcp.tools.order_helpers import _price_str
 from schwab_mcp.tools.orders import (
     _build_equity_order_spec,
     _build_option_order_spec,
@@ -283,13 +285,9 @@ class TestPriceStr:
         ],
     )
     def test_matches_schwab_py_truncation(self, price, expected):
-        from schwab_mcp.tools.order_helpers import _price_str
-
         assert _price_str(price) == expected
 
     def test_building_a_limit_order_emits_no_deprecation_warning(self):
-        import warnings
-
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             spec = _build_equity_order_spec("AAPL", 10, "BUY", "LIMIT", price=904.5)
