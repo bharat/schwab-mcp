@@ -6,54 +6,57 @@ Signal message on your phone. It talks to a local
 public inbound endpoint and trade details stay end-to-end encrypted between
 the daemon and your phone.
 
-## What you need
+There are two ways to attach the daemon to Signal. **Linking** is simpler and
+needs no extra phone number; **registering** gives the bot its own identity.
 
-| Thing | Notes |
-|---|---|
-| A second phone number | The daemon registers its **own** Signal account; it cannot share the number your phone uses. A cheap VoIP number works. |
-| `signal-cli-rest-api` running locally | Easiest is the [bbernhard/signal-cli-rest-api][rest] Docker image. |
-| Your own number | Passed as `--signal-approver`; only replies from this number are honoured. |
+## Option A — link as a device on your account (recommended)
 
-## One-time registration
+The daemon joins your existing Signal account as a secondary device, the same
+way Signal Desktop does. Approval prompts land in your **Note to Self** thread.
 
 ```bash
-# 1. Start the REST daemon (persists state in the named volume)
-docker run -d --name signal-api \
-  -p 127.0.0.1:8080:8080 \
-  -v signal-cli-data:/home/.local/share/signal-cli \
-  -e MODE=native \
-  bbernhard/signal-cli-rest-api:latest
-
-# 2. Register the bot number (replace with your VoIP number)
-curl -X POST http://127.0.0.1:8080/v1/register/+15555550100
-
-# 3. Verify with the SMS code Signal sends to that number
-curl -X POST http://127.0.0.1:8080/v1/register/+15555550100/verify/123456
+scripts/signal-daemon up
+scripts/signal-daemon link        # opens a QR — scan from your phone:
+                                  # Signal → Settings → Linked Devices → +
 ```
 
-Send yourself a test message to confirm:
-
-```bash
-curl -X POST http://127.0.0.1:8080/v2/send \
-  -H 'Content-Type: application/json' \
-  -d '{"number":"+15555550100","recipients":["+15555550199"],"message":"hello"}'
-```
-
-## Running the server with Signal approvals
+After scanning, both `--signal-account` and `--signal-approver` are **your**
+number:
 
 ```bash
 schwab-mcp server \
-  --client-id "$SCHWAB_CLIENT_ID" \
-  --client-secret "$SCHWAB_CLIENT_SECRET" \
   --signal-api-url http://127.0.0.1:8080 \
-  --signal-account +15555550100 \
+  --signal-account  +15555550199 \
   --signal-approver +15555550199
 ```
 
-When a write tool is invoked you'll receive a Signal message describing the
-tool and its arguments. **Reply to that message** (long-press → Reply) with
-`ok` to approve or `no` to deny. Anything else, or no reply within
-`--signal-timeout` seconds (default 600), is treated as a denial.
+To unlink later, remove the device from your phone's Linked Devices list.
+
+## Option B — register a separate bot number
+
+If you'd rather the bot have its own identity (and you have a spare number):
+
+```bash
+scripts/signal-daemon up
+scripts/signal-daemon register +15555550100         # Signal sends an SMS code
+scripts/signal-daemon verify   +15555550100 123456  # enter the code
+```
+
+Then `--signal-account` is the bot's number and `--signal-approver` is yours:
+
+```bash
+schwab-mcp server \
+  --signal-api-url http://127.0.0.1:8080 \
+  --signal-account  +15555550100 \
+  --signal-approver +15555550199
+```
+
+## Approving a trade
+
+When a write tool is invoked you receive a Signal message describing the tool
+and its arguments. **Reply to that message** (long-press → Reply) with `ok` to
+approve or `no` to deny. Anything else, or no reply within `--signal-timeout`
+seconds (default 600), is treated as a denial.
 
 You may not configure Discord and Signal approvals at the same time; the
 server wires exactly one approval backend.
