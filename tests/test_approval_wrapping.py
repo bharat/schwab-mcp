@@ -15,6 +15,7 @@ from schwab_mcp.approvals import (
     ApprovalRequest,
     DiscordApprovalManager,
     DiscordApprovalSettings,
+    NoOpApprovalManager,
 )
 from schwab_mcp.context import SchwabContext, SchwabServerContext
 from schwab_mcp.tools import _registration
@@ -169,6 +170,29 @@ def test_progress_notifications_emitted_when_supported() -> None:
     assert [entry["progress"] for entry in session.progress] == [0, 1]
     assert session.progress[0]["message"].startswith("Waiting for reviewer approval")
     assert session.progress[1]["message"].startswith("Reviewer approved")
+
+
+def test_noop_manager_logs_every_auto_approval(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    manager = NoOpApprovalManager()
+    request = ApprovalRequest(
+        id="appr-1",
+        tool_name="place_equity_order",
+        request_id="req-1",
+        client_id=None,
+        arguments={"symbol": '"NVDA"', "account_hash": '"\\u2026WXYZ"'},
+    )
+
+    with caplog.at_level("WARNING", logger="schwab_mcp.approvals.base"):
+        decision = await_result(manager.require(request))
+
+    assert decision is ApprovalDecision.APPROVED
+    assert len(caplog.records) == 1
+    record = caplog.records[0]
+    assert record.levelname == "WARNING"
+    assert "place_equity_order" in record.getMessage()
+    assert "req-1" in record.getMessage()
 
 
 def test_discord_manager_requires_approvers() -> None:

@@ -1,4 +1,5 @@
 import click
+import logging
 import sys
 import anyio
 import os
@@ -15,6 +16,8 @@ from schwab_mcp.approvals import (
     SignalApprovalSettings,
 )
 
+
+logger = logging.getLogger(__name__)
 
 APP_NAME = "schwab-mcp"
 TOKEN_MAX_AGE_SECONDS = schwab_auth.DEFAULT_MAX_TOKEN_AGE_SECONDS
@@ -276,10 +279,11 @@ def server(
             )
             return 1
     except Exception as e:
+        logger.exception("Error initializing Schwab client")
         send_error_response(
-            f"Error initializing Schwab client: {str(e)}",
+            "Failed to initialize Schwab client; see server logs.",
             code=500,
-            details={"error": str(e)},
+            details={"error_type": type(e).__name__},
         )
         return 1
 
@@ -378,9 +382,12 @@ def server(
         else:
             approval_manager = NoOpApprovalManager()
 
-        if jesus_take_the_wheel and discord_token:
+        if jesus_take_the_wheel:
             click.echo(
-                "Warning: --jesus-take-the-wheel bypasses Discord approvals.", err=True
+                "WARNING: --jesus-take-the-wheel is set. Every write tool "
+                "(order placement, cancellation, etc.) will execute with NO "
+                "human approval.",
+                err=True,
             )
 
         server = SchwabMCPServer(
@@ -394,8 +401,11 @@ def server(
         anyio.run(server.run, backend="asyncio")
         return 0
     except Exception as e:
+        logger.exception("Error running server")
         send_error_response(
-            f"Error running server: {str(e)}", code=500, details={"error": str(e)}
+            "Server failed; see server logs.",
+            code=500,
+            details={"error_type": type(e).__name__},
         )
         return 1
 
