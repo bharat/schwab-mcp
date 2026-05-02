@@ -124,21 +124,17 @@ def auth(
 
     try:
         if manual:
-            # Use manual flow - user pastes the callback URL
             from schwab import auth as schwab_raw_auth
 
-            client = schwab_raw_auth.client_from_manual_flow(
+            schwab_raw_auth.client_from_manual_flow(
                 api_key=client_id,
                 app_secret=client_secret,
                 callback_url=callback_url,
                 token_path=token_path,
+                token_write_func=token_manager.write,
                 asyncio=False,
                 base_url=base_url,
             )
-
-            # Save token using our manager
-            if hasattr(client, "_session") and hasattr(client._session, "token"):
-                token_manager.write(client._session.token)
         else:
             # This will initiate the automatic authentication flow
             schwab_auth.easy_client(
