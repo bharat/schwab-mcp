@@ -37,7 +37,7 @@ case "$cmd" in
             docker run -d --name "$CONTAINER" \
                 -p "127.0.0.1:${PORT}:8080" \
                 -v signal-cli-data:/home/.local/share/signal-cli \
-                -e MODE=native \
+                -e MODE=json-rpc \
                 bbernhard/signal-cli-rest-api:latest
         fi
         echo "signal-cli-rest-api listening on ${API}"

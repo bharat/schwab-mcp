@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+import websockets
 
 from schwab_mcp.approvals.base import (
     ApprovalDecision,
@@ -144,19 +146,19 @@ class SignalApprovalManager(ApprovalManager):
             logger.exception("Failed to post Signal notice")
 
     async def _receive_loop(self) -> None:
+        ws_url = (
+            self._settings.api_url.replace("http", "ws", 1)
+            + f"/v1/receive/{self._settings.account}"
+        )
         while True:
             try:
-                response = await self._client.get(
-                    f"/v1/receive/{self._settings.account}",
-                    params={"timeout": 30},
-                )
-                response.raise_for_status()
-                for envelope in response.json():
-                    await self._handle_envelope(envelope)
+                async with websockets.connect(ws_url) as ws:
+                    async for frame in ws:
+                        await self._handle_envelope(json.loads(frame))
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("Signal receive loop error; retrying in 5s")
+                logger.exception("Signal receive websocket error; reconnecting in 5s")
                 await asyncio.sleep(5)
 
     async def _handle_envelope(self, envelope: dict[str, Any]) -> None:
