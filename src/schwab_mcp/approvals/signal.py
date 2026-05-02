@@ -162,7 +162,11 @@ class SignalApprovalManager(ApprovalManager):
     async def _handle_envelope(self, envelope: dict[str, Any]) -> None:
         env = envelope.get("envelope", envelope)
         source = env.get("sourceNumber") or env.get("source")
-        data = env.get("dataMessage") or {}
+        # In linked-device mode the approver's reply is their own outgoing
+        # message, delivered to us as syncMessage.sentMessage rather than an
+        # incoming dataMessage. Accept either shape.
+        sync = (env.get("syncMessage") or {}).get("sentMessage")
+        data = env.get("dataMessage") or sync or {}
         quote = data.get("quote") or {}
         quoted_ts = quote.get("id")
         text = (data.get("message") or "").strip().lower()

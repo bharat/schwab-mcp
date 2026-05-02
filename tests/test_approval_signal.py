@@ -100,6 +100,31 @@ def test_require_approves_on_ok_reply(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "approved" in sent[-1]
 
 
+def test_require_approves_on_sync_message_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Linked-device mode: the approver's reply arrives as syncMessage.sentMessage."""
+    manager, _ = _make_manager(monkeypatch)
+
+    async def scenario() -> ApprovalDecision:
+        task = asyncio.create_task(manager.require(_request()))
+        await asyncio.sleep(0)
+        (sent_ts,) = list(manager._pending)
+        await manager._handle_envelope(
+            {
+                "envelope": {
+                    "sourceNumber": "+15555550199",
+                    "syncMessage": {
+                        "sentMessage": {"message": "ok", "quote": {"id": sent_ts}}
+                    },
+                }
+            }
+        )
+        return await task
+
+    assert await_result(scenario()) is ApprovalDecision.APPROVED
+
+
 def test_require_denies_on_no_reply(monkeypatch: pytest.MonkeyPatch) -> None:
     manager, sent = _make_manager(monkeypatch)
 
