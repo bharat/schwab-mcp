@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Send one fake approval request through SignalApprovalManager and wait for a
+# reply on your phone. No Schwab auth, no MCP client, no real trade.
+# Runs on the HOST; executes inside the devcontainer where the venv lives.
+
+set -euo pipefail
+
+: "${SCHWAB_MCP_SIGNAL_ACCOUNT:?set SCHWAB_MCP_SIGNAL_ACCOUNT to the bot E.164 number}"
+: "${SCHWAB_MCP_SIGNAL_APPROVERS:?set SCHWAB_MCP_SIGNAL_APPROVERS to your E.164 number}"
+API_URL=${SCHWAB_MCP_SIGNAL_API_URL:-http://host.docker.internal:8080}
+TIMEOUT=${1:-120}
+
+exec devcontainer exec --workspace-folder . -- \
+    uv run scripts/smoke-signal \
+        --api-url "$API_URL" \
+        --account "$SCHWAB_MCP_SIGNAL_ACCOUNT" \
+        --approver "$SCHWAB_MCP_SIGNAL_APPROVERS" \
+        --timeout "$TIMEOUT"

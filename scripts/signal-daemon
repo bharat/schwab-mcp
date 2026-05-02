@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Manage the local signal-cli-rest-api container used by SignalApprovalManager.
+# Runs on the HOST (needs docker + curl).
+
+set -euo pipefail
+
+CONTAINER=${SIGNAL_API_CONTAINER:-signal-api}
+PORT=${SIGNAL_API_PORT:-8080}
+API="http://127.0.0.1:${PORT}"
+
+usage() {
+    cat <<EOF
+Usage: scripts/signal-daemon <command> [args]
+
+  up                          start the signal-cli-rest-api container (idempotent)
+  down                        stop and remove it (registration data persists in the volume)
+  logs                        follow daemon logs
+  register <bot-number>       begin registration; Signal sends an SMS code to that number
+  verify   <bot-number> <code>  complete registration with the SMS code
+  send     <bot> <to> <text>  sanity-check: send <text> from <bot> to <to>
+
+Env: SIGNAL_API_PORT (default 8080), SIGNAL_API_CONTAINER (default signal-api)
+EOF
+}
+
+cmd=${1:-}
+shift || true
+
+case "$cmd" in
+    up)
+        if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER"; then
+            docker start "$CONTAINER"
+        else
+            docker run -d --name "$CONTAINER" \
+                -p "127.0.0.1:${PORT}:8080" \
+                -v signal-cli-data:/home/.local/share/signal-cli \
+                -e MODE=native \
+                bbernhard/signal-cli-rest-api:latest
+        fi
+        echo "signal-cli-rest-api listening on ${API}"
+        ;;
+    down)
+        docker rm -f "$CONTAINER"
+        ;;
+    logs)
+        docker logs -f "$CONTAINER"
+        ;;
+    register)
+        [ $# -eq 1 ] || { usage; exit 1; }
+        curl -fsS -X POST "${API}/v1/register/$1" && echo
+        ;;
+    verify)
+        [ $# -eq 2 ] || { usage; exit 1; }
+        curl -fsS -X POST "${API}/v1/register/$1/verify/$2" && echo
+        ;;
+    send)
+        [ $# -eq 3 ] || { usage; exit 1; }
+        curl -fsS -X POST "${API}/v2/send" \
+            -H 'Content-Type: application/json' \
+            -d "{\"number\":\"$1\",\"recipients\":[\"$2\"],\"message\":\"$3\"}" && echo
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac

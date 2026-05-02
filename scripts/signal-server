@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Run the MCP server inside the devcontainer with Signal approvals wired up.
+# Runs on the HOST; the server itself runs in the container.
+
+set -euo pipefail
+
+: "${SCHWAB_MCP_SIGNAL_ACCOUNT:?set SCHWAB_MCP_SIGNAL_ACCOUNT to the bot E.164 number}"
+: "${SCHWAB_MCP_SIGNAL_APPROVERS:?set SCHWAB_MCP_SIGNAL_APPROVERS to your E.164 number}"
+API_URL=${SCHWAB_MCP_SIGNAL_API_URL:-http://host.docker.internal:8080}
+
+exec devcontainer exec --workspace-folder . -- \
+    uv run schwab-mcp server \
+        --signal-api-url "$API_URL" \
+        --signal-account "$SCHWAB_MCP_SIGNAL_ACCOUNT" \
+        --signal-approver "$SCHWAB_MCP_SIGNAL_APPROVERS" \
+        "$@"
