@@ -1,0 +1,64 @@
+#!/usr/bin/env python
+"""Manual smoke test for SignalApprovalManager.
+
+Sends one fake approval request and waits for a reply. No Schwab, no MCP.
+
+    uv run scripts/smoke-signal \
+        --api-url http://host.docker.internal:8080 \
+        --account +1555BOTNUMBER \
+        --approver +1555YOURNUMBER
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import uuid
+
+from schwab_mcp.approvals import (
+    ApprovalRequest,
+    SignalApprovalManager,
+    SignalApprovalSettings,
+)
+
+
+async def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--api-url", default="http://127.0.0.1:8080")
+    p.add_argument("--account", required=True)
+    p.add_argument("--approver", required=True, action="append")
+    p.add_argument("--timeout", type=float, default=120.0)
+    args = p.parse_args()
+
+    mgr = SignalApprovalManager(
+        SignalApprovalSettings(
+            api_url=args.api_url,
+            account=args.account,
+            approver_numbers=frozenset(args.approver),
+            timeout_seconds=args.timeout,
+        )
+    )
+    req = ApprovalRequest(
+        id=uuid.uuid4().hex[:6],
+        tool_name="place_equity_order",
+        request_id="smoke-test",
+        client_id=None,
+        arguments={
+            "symbol": '"NVDA"',
+            "quantity": "50",
+            "instruction": '"BUY"',
+            "order_type": '"LIMIT"',
+            "price": "904.50",
+            "account_hash": '"\\u2026WXYZ"',
+        },
+    )
+    print(f"Sending approval request {req.id} — check your phone...")
+    try:
+        decision = await mgr.require(req)
+    finally:
+        await mgr.stop()
+    print(f"Decision: {decision.value}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

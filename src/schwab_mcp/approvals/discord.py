@@ -11,6 +11,7 @@ from schwab_mcp.approvals.base import (
     ApprovalDecision,
     ApprovalManager,
     ApprovalRequest,
+    format_arguments,
 )
 
 
@@ -315,15 +316,7 @@ class DiscordApprovalManager(ApprovalManager):
 
     @staticmethod
     def _format_arguments(arguments: Mapping[str, str]) -> str:
-        if not arguments:
-            return "```\n<none>\n```"
-
-        lines = [f"{key} = {value}" for key, value in arguments.items()]
-        # Backticks in values are attacker-controlled (LLM-supplied) and would
-        # close the code fence early, re-enabling live markdown. Substitute a
-        # visually similar non-metacharacter so the fence cannot be broken.
-        body = "\n".join(lines).replace("`", "ˋ")
-        return f"```\n{body}\n```"
+        return format_arguments(arguments)
 
     @staticmethod
     def _colour_for_decision(decision: ApprovalDecision) -> discord.Colour:

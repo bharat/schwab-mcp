@@ -11,6 +11,8 @@ from schwab_mcp.approvals import (
     DiscordApprovalManager,
     DiscordApprovalSettings,
     NoOpApprovalManager,
+    SignalApprovalManager,
+    SignalApprovalSettings,
 )
 
 
@@ -179,6 +181,35 @@ def auth(
     help="Seconds to wait for Discord approval before timing out.",
 )
 @click.option(
+    "--signal-api-url",
+    type=str,
+    default="http://127.0.0.1:8080",
+    show_default=True,
+    envvar="SCHWAB_MCP_SIGNAL_API_URL",
+    help="Base URL of the local signal-cli REST daemon.",
+)
+@click.option(
+    "--signal-account",
+    type=str,
+    envvar="SCHWAB_MCP_SIGNAL_ACCOUNT",
+    help="E.164 number the signal-cli daemon is registered as.",
+)
+@click.option(
+    "--signal-approver",
+    type=str,
+    multiple=True,
+    envvar="SCHWAB_MCP_SIGNAL_APPROVERS",
+    help="E.164 number allowed to approve or deny. Pass multiple times for several reviewers.",
+)
+@click.option(
+    "--signal-timeout",
+    type=int,
+    default=600,
+    show_default=True,
+    envvar="SCHWAB_MCP_SIGNAL_TIMEOUT",
+    help="Seconds to wait for Signal approval before timing out.",
+)
+@click.option(
     "--json",
     "json_output",
     default=False,
@@ -196,6 +227,10 @@ def server(
     discord_channel_id: int | None,
     discord_approver: tuple[str, ...],
     discord_timeout: int,
+    signal_api_url: str,
+    signal_account: str | None,
+    signal_approver: tuple[str, ...],
+    signal_timeout: int,
     no_technical_tools: bool,
     json_output: bool,
 ) -> int:
@@ -276,6 +311,14 @@ def server(
                 approver_values,
             )
         )
+        signal_requested = any((signal_account, signal_approver))
+        if discord_requested and signal_requested:
+            send_error_response(
+                "Configure either Discord or Signal approvals, not both.",
+                code=400,
+                details={"discord": True, "signal": True},
+            )
+            return 1
         allow_write = False
 
         if jesus_take_the_wheel:
@@ -310,6 +353,27 @@ def server(
                 timeout_seconds=float(discord_timeout),
             )
             approval_manager = DiscordApprovalManager(settings)
+            allow_write = True
+        elif signal_requested:
+            approver_numbers = SignalApprovalManager.authorized_numbers(signal_approver)
+            if not signal_account or not approver_numbers:
+                send_error_response(
+                    "Signal approval configuration is required to enable write tools.",
+                    code=400,
+                    details={
+                        "missing_account": not bool(signal_account),
+                        "missing_approvers": not bool(approver_numbers),
+                    },
+                )
+                return 1
+            approval_manager = SignalApprovalManager(
+                SignalApprovalSettings(
+                    api_url=signal_api_url,
+                    account=signal_account,
+                    approver_numbers=approver_numbers,
+                    timeout_seconds=float(signal_timeout),
+                )
+            )
             allow_write = True
         else:
             approval_manager = NoOpApprovalManager()
