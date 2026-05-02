@@ -18,6 +18,7 @@ from schwab_mcp.context import SchwabContext
 from schwab_mcp.tools._registration import register_tool
 from schwab_mcp.tools.utils import parse_date
 from schwab_mcp.tools.order_helpers import (
+    _price_str,
     equity_buy_limit,
     equity_buy_market,
     equity_buy_stop,
@@ -885,7 +886,7 @@ async def place_option_combo_order(
     # Set order type and net price
     builder = builder.set_order_type(order_type.upper())
     if price is not None:
-        builder = builder.set_price(str(price))  # net debit/credit as positive number
+        builder = builder.set_price(_price_str(price))
 
     for leg in legs:
         builder = builder.add_option_leg(

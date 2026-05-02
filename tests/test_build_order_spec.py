@@ -267,3 +267,31 @@ class TestBuildTrailingStopOrderSpec:
             _build_trailing_stop_order_spec(
                 symbol, quantity, "SELL", trail_offset=bad_offset
             )
+
+
+class TestPriceStr:
+    @pytest.mark.parametrize(
+        ("price", "expected"),
+        [
+            (904.5, "904.50"),
+            (0.1 + 0.2, "0.3000"),
+            (123.456789, "123.45"),
+            (0.0001, "0.0001"),
+            (1.005, "1.00"),
+            (0.0, "0.00"),
+            (-12.349, "-12.34"),
+        ],
+    )
+    def test_matches_schwab_py_truncation(self, price, expected):
+        from schwab_mcp.tools.order_helpers import _price_str
+
+        assert _price_str(price) == expected
+
+    def test_building_a_limit_order_emits_no_deprecation_warning(self):
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            spec = _build_equity_order_spec("AAPL", 10, "BUY", "LIMIT", price=904.5)
+            built = cast(dict[str, Any], spec.build())
+        assert built["price"] == "904.50"
