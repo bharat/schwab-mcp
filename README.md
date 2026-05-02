@@ -7,7 +7,7 @@ The **Schwab Model Context Protocol (MCP) Server** connects your Schwab account 
 *   **Market Data**: Real-time quotes, price history, option chains, and market movers.
 *   **Account Management**: View balances, positions, and transactions.
 *   **Trading**: comprehensive support for equities and options, including complex strategies (OCO, Bracket).
-*   **Safety First**: Critical actions (like trading) are gated behind a **Discord approval workflow** by default.
+*   **Safety First**: Critical actions (like trading) are gated behind a **Discord or Signal approval workflow** by default.
 *   **LLM Integration**: Designed specifically for Agentic AI workflows.
 
 ## Quick Start
@@ -57,13 +57,20 @@ Start the MCP server to expose the tools to your MCP client.
 # Basic Read-Only Mode (Safest) — credentials read from save-credentials file
 schwab-mcp server
 
-# With Trading Enabled (Requires Discord Approval)
+# With Trading Enabled (Discord approval)
 schwab-mcp server \
   --discord-channel-id CHANNEL_ID \
   --discord-approver YOUR_USER_ID
+
+# With Trading Enabled (Signal approval)
+schwab-mcp server \
+  --signal-account +15555550100 \
+  --signal-approver +15555550199
 ```
 
-> **Note**: For trading capabilities, you must set up a Discord bot for approvals. See [Discord Setup Guide](docs/discord-setup.md).
+> **Note**: For trading capabilities you must configure an approval backend.
+> See the [Discord Setup Guide](docs/discord-setup.md) or
+> [Signal Setup Guide](docs/signal-setup.md).
 
 ## Configuration
 
@@ -80,8 +87,10 @@ You can configure the server using CLI flags or Environment Variables.
 | `--client-secret` | `SCHWAB_CLIENT_SECRET` | **Required**. Schwab App Secret. |
 | `--callback-url` | `SCHWAB_CALLBACK_URL` | Redirect URL (default: `https://127.0.0.1:8182`). |
 | `--discord-token` | `SCHWAB_MCP_DISCORD_TOKEN` | Discord bot token for trade approvals. |
+| `--signal-account` | `SCHWAB_MCP_SIGNAL_ACCOUNT` | E.164 number the local signal-cli daemon is registered as. |
+| `--signal-approver` | `SCHWAB_MCP_SIGNAL_APPROVERS` | E.164 number allowed to approve trades (repeatable). |
 | `--token-path` | N/A | Path to save/load token (default: `~/.local/share/...`). |
-| `--jesus-take-the-wheel`| N/A | **DANGER**. Bypasses Discord approval for trades. |
+| `--jesus-take-the-wheel`| N/A | **DANGER**. Bypasses approval for trades. |
 | `--no-technical-tools` | N/A | Disables technical analysis tools (SMA, RSI, etc.). |
 | `--json` | N/A | Returns raw JSON instead of formatted text (useful for some agents). |
 

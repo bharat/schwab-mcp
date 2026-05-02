@@ -25,6 +25,22 @@ class ApprovalRequest:
     arguments: Mapping[str, str]
 
 
+def format_arguments(arguments: Mapping[str, str]) -> str:
+    """Render approval arguments as a fenced text block.
+
+    Backticks in values are attacker-controlled (LLM-supplied) and would close
+    a markdown code fence early, re-enabling live formatting. Substitute a
+    visually similar non-metacharacter so the fence cannot be broken. Shared
+    by all approval backends so the redaction-safe rendering stays consistent.
+    """
+    if not arguments:
+        return "```\n<none>\n```"
+
+    lines = [f"{key} = {value}" for key, value in arguments.items()]
+    body = "\n".join(lines).replace("`", "ˋ")
+    return f"```\n{body}\n```"
+
+
 class ApprovalManager(abc.ABC):
     """Interface for asynchronous approval backends."""
 
@@ -51,4 +67,5 @@ __all__ = [
     "ApprovalManager",
     "ApprovalRequest",
     "NoOpApprovalManager",
+    "format_arguments",
 ]
