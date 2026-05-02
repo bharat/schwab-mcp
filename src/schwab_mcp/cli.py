@@ -378,9 +378,12 @@ def server(
         else:
             approval_manager = NoOpApprovalManager()
 
-        if jesus_take_the_wheel and discord_token:
+        if jesus_take_the_wheel:
             click.echo(
-                "Warning: --jesus-take-the-wheel bypasses Discord approvals.", err=True
+                "WARNING: --jesus-take-the-wheel is set. Every write tool "
+                "(order placement, cancellation, etc.) will execute with NO "
+                "human approval.",
+                err=True,
             )
 
         server = SchwabMCPServer(

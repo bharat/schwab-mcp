@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import abc
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping
+
+
+logger = logging.getLogger(__name__)
 
 
 class ApprovalDecision(str, Enum):
@@ -56,9 +60,22 @@ class ApprovalManager(abc.ABC):
 
 
 class NoOpApprovalManager(ApprovalManager):
-    """Approval manager that always approves requests."""
+    """Approval manager that always approves requests.
 
-    async def require(self, request: ApprovalRequest) -> ApprovalDecision:  # noqa: ARG002
+    Used when ``--jesus-take-the-wheel`` is set. Every auto-approval is logged
+    at WARNING so there is at least an audit trail in stderr/logs of which
+    write tools fired and with what (already-redacted) arguments.
+    """
+
+    async def require(self, request: ApprovalRequest) -> ApprovalDecision:
+        logger.warning(
+            "Auto-approving write tool '%s' (request=%s, approval=%s) with no "
+            "human review: %s",
+            request.tool_name,
+            request.request_id,
+            request.id,
+            dict(request.arguments),
+        )
         return ApprovalDecision.APPROVED
 
 
