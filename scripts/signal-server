@@ -3,6 +3,7 @@
 # Runs on the HOST; the server itself runs in the container.
 
 set -euo pipefail
+[ -f .env ] && set -a && source .env && set +a
 
 : "${SCHWAB_MCP_SIGNAL_ACCOUNT:?set SCHWAB_MCP_SIGNAL_ACCOUNT to the bot E.164 number}"
 : "${SCHWAB_MCP_SIGNAL_APPROVERS:?set SCHWAB_MCP_SIGNAL_APPROVERS to your E.164 number}"

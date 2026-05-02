@@ -3,6 +3,7 @@
 # Runs on the HOST (needs docker + curl).
 
 set -euo pipefail
+[ -f .env ] && set -a && source .env && set +a
 
 CONTAINER=${SIGNAL_API_CONTAINER:-signal-api}
 PORT=${SIGNAL_API_PORT:-8080}
