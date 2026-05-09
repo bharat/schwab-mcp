@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 import httpx
@@ -26,6 +27,11 @@ _BODY_LIMIT = 1800
 _APPROVE_WORDS = frozenset({"ok", "yes", "y", "approve", "approved", "✅", "👍"})
 _DENY_WORDS = frozenset({"no", "n", "deny", "denied", "❌", "👎"})
 
+_AGENT_NAME = "Claude Trader"
+_FOOTER = 'Reply "ok" to approve or "no" to deny.'
+
+_EMPTY_NAMES: Mapping[str, str] = MappingProxyType({})
+
 
 @dataclass(slots=True, frozen=True)
 class SignalApprovalSettings:
@@ -35,6 +41,11 @@ class SignalApprovalSettings:
     account: str
     approver_numbers: frozenset[str]
     timeout_seconds: float = 600.0
+    account_names: Mapping[str, str] = field(default_factory=lambda: _EMPTY_NAMES)
+    """Map of last-4-chars of account_hash to a friendly name (e.g. ``5805 ->
+    "Rollover IRA"``). Used by the per-tool message renderers to refer to
+    accounts by name instead of by redacted-hash suffix. Empty map preserves
+    the previous behaviour (always show ``…XXXX``)."""
 
 
 @dataclass(slots=True)
@@ -83,8 +94,7 @@ class SignalApprovalManager(ApprovalManager):
     async def require(self, request: ApprovalRequest) -> ApprovalDecision:
         await self.start()
 
-        rendered_args = format_arguments(request.arguments)
-        body = self._build_body(request, rendered_args)
+        body = self._render_body(request)
         if len(body) > _BODY_LIMIT:
             logger.warning(
                 "Auto-denying approval %s for tool '%s': body too large to "
@@ -198,24 +208,39 @@ class SignalApprovalManager(ApprovalManager):
             f"'{pending.request.tool_name}' {decision.value} by {source}."
         )
 
-    def _build_body(self, request: ApprovalRequest, rendered_args: str) -> str:
-        lines = [
-            "⚠️ schwab-mcp: write operation needs approval",
-            "",
-            f"tool        {request.tool_name}",
-            f"approval    {request.id}",
-            f"request     {request.request_id}",
-        ]
-        if request.client_id:
-            lines.append(f"client      {request.client_id}")
-        lines += [
-            "",
-            rendered_args,
-            "",
-            'Reply to this message with "ok" to approve or "no" to deny.',
-            f"Expires in {int(self._settings.timeout_seconds)}s.",
-        ]
-        return "\n".join(lines)
+    def _render_body(self, request: ApprovalRequest) -> str:
+        """Render the Signal message body for an approval request.
+
+        Per-tool renderers produce a one- or two-line natural-language summary
+        for the common write tools. Anything we don't have a custom renderer
+        for falls back to a slimmed-down YAML-style argument dump.
+        """
+        renderer = _TOOL_RENDERERS.get(request.tool_name)
+        if renderer is not None:
+            try:
+                args = _decode_arguments(request.arguments)
+                summary = renderer(args, self._settings.account_names)
+            except Exception:
+                # Never fail the approval just because the friendly renderer
+                # had a bug — fall through to the verbose format so the user
+                # still sees the raw arguments and can decide.
+                logger.exception(
+                    "Friendly renderer failed for tool '%s' (approval %s); "
+                    "falling back to verbose format.",
+                    request.tool_name,
+                    request.id,
+                )
+            else:
+                return f"{summary}\n\n{_FOOTER}"
+
+        rendered_args = format_arguments(request.arguments)
+        return (
+            f"{_AGENT_NAME} wants to call: {request.tool_name}\n"
+            f"\n"
+            f"{rendered_args}\n"
+            f"\n"
+            f"{_FOOTER}"
+        )
 
     @staticmethod
     def authorized_numbers(values: Sequence[str] | None) -> frozenset[str]:
@@ -223,6 +248,166 @@ class SignalApprovalManager(ApprovalManager):
         if not values:
             return frozenset()
         return frozenset(v.strip() for v in values if v.strip())
+
+    @staticmethod
+    def parse_account_names(values: Sequence[str] | None) -> Mapping[str, str]:
+        """Parse ``last4=Name`` entries (from CLI flags or comma-split env) into
+        an immutable mapping. Repeated keys: last value wins. Whitespace and
+        empty entries are ignored. Invalid entries are skipped with a warning.
+        """
+        if not values:
+            return _EMPTY_NAMES
+        result: dict[str, str] = {}
+        for raw in values:
+            if not raw:
+                continue
+            for chunk in raw.split(","):
+                chunk = chunk.strip()
+                if not chunk:
+                    continue
+                if "=" not in chunk:
+                    logger.warning(
+                        "Ignoring malformed account-name entry %r (expected "
+                        "'last4=Name')",
+                        chunk,
+                    )
+                    continue
+                last4, _, name = chunk.partition("=")
+                last4 = last4.strip()
+                name = name.strip()
+                if not last4 or not name:
+                    logger.warning("Ignoring empty account-name entry %r", chunk)
+                    continue
+                result[last4] = name
+        return MappingProxyType(result) if result else _EMPTY_NAMES
+
+
+# --------------------------------------------------------------------------- #
+# Per-tool message renderers
+# --------------------------------------------------------------------------- #
+
+
+def _decode_arguments(arguments: Mapping[str, str]) -> dict[str, Any]:
+    """Decode the JSON-encoded argument values produced by `_format_argument`
+    in `tools/_registration.py`. Falls back to the raw string on a decode
+    failure so a single bad value never sinks the whole renderer."""
+    decoded: dict[str, Any] = {}
+    for name, raw in arguments.items():
+        try:
+            decoded[name] = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            decoded[name] = raw
+    return decoded
+
+
+def _account_label(account_value: Any, account_names: Mapping[str, str]) -> str:
+    """Resolve the account display label from a (redacted) account_hash value.
+
+    The wrapper in `_registration.py` redacts `account_hash` to `…XXXX` (last
+    4 chars). We strip the leading horizontal-ellipsis if present and look up
+    the friendly name; otherwise fall back to ``account …XXXX``.
+    """
+    if not isinstance(account_value, str):
+        return "the requested account"
+    last4 = account_value.lstrip("…").strip()
+    friendly = account_names.get(last4)
+    if friendly:
+        return f"the {friendly} account"
+    if last4:
+        return f"account …{last4}"
+    return "the requested account"
+
+
+def _format_money(value: Any) -> str | None:
+    """Render a numeric price as a dollar string, or None if not numeric."""
+    if value is None:
+        return None
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f"${amount:,.2f}"
+
+
+_DURATION_LABELS = {
+    "DAY": "Day",
+    "GOOD_TILL_CANCEL": "GTC",
+    "FILL_OR_KILL": "FOK",
+    "IMMEDIATE_OR_CANCEL": "IOC",
+    "END_OF_WEEK": "End of week",
+    "END_OF_MONTH": "End of month",
+    "NEXT_END_OF_MONTH": "Next end of month",
+}
+
+
+def _duration_label(value: Any) -> str:
+    if not isinstance(value, str):
+        return "Day"
+    return _DURATION_LABELS.get(value.upper(), value.title().replace("_", " "))
+
+
+def _order_descriptor(args: Mapping[str, Any]) -> str:
+    """Render the ``(Type, Duration[, session])`` descriptor used at the end
+    of an order message."""
+    order_type = str(args.get("order_type") or "MARKET").upper()
+    parts: list[str] = []
+    if order_type == "MARKET":
+        parts.append("Market")
+    elif order_type == "LIMIT":
+        price = _format_money(args.get("price"))
+        parts.append(f"Limit @ {price}" if price else "Limit")
+    elif order_type == "STOP":
+        stop = _format_money(args.get("stop_price"))
+        parts.append(f"Stop @ {stop}" if stop else "Stop")
+    elif order_type == "STOP_LIMIT":
+        stop = _format_money(args.get("stop_price"))
+        limit = _format_money(args.get("price"))
+        if stop and limit:
+            parts.append(f"Stop {stop} → Limit {limit}")
+        elif stop:
+            parts.append(f"Stop-Limit (stop {stop})")
+        else:
+            parts.append("Stop-Limit")
+    elif order_type == "TRAILING_STOP":
+        parts.append("Trailing Stop")
+    else:
+        parts.append(order_type.title().replace("_", " "))
+
+    parts.append(_duration_label(args.get("duration")))
+
+    session = args.get("session")
+    if isinstance(session, str) and session.upper() not in {"NORMAL", ""}:
+        parts.append(f"session: {session.title()}")
+
+    return f"({', '.join(parts)})"
+
+
+def _render_place_equity_order(
+    args: Mapping[str, Any], account_names: Mapping[str, str]
+) -> str:
+    instruction = str(args.get("instruction") or "").lower() or "trade"
+    qty = args.get("quantity") or "?"
+    symbol = str(args.get("symbol") or "?")
+    account = _account_label(args.get("account_hash"), account_names)
+    descriptor = _order_descriptor(args)
+    return (
+        f"{_AGENT_NAME} wants to {instruction} {qty} {symbol} in "
+        f"{account}. {descriptor}"
+    )
+
+
+def _render_cancel_order(
+    args: Mapping[str, Any], account_names: Mapping[str, str]
+) -> str:
+    order_id = args.get("order_id") or "?"
+    account = _account_label(args.get("account_hash"), account_names)
+    return f"{_AGENT_NAME} wants to cancel order {order_id} in {account}."
+
+
+_TOOL_RENDERERS: Mapping[str, Any] = {
+    "place_equity_order": _render_place_equity_order,
+    "cancel_order": _render_cancel_order,
+}
 
 
 __all__ = ["SignalApprovalManager", "SignalApprovalSettings"]

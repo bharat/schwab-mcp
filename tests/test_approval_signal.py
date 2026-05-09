@@ -96,7 +96,7 @@ def test_require_approves_on_ok_reply(monkeypatch: pytest.MonkeyPatch) -> None:
     decision = await_result(scenario())
 
     assert decision is ApprovalDecision.APPROVED
-    assert "needs approval" in sent[0]
+    assert "Claude Trader" in sent[0]
     assert "approved" in sent[-1]
 
 
@@ -189,9 +189,14 @@ def test_require_auto_denies_when_body_overflows(
 ) -> None:
     manager, sent = _make_manager(monkeypatch)
 
+    # Use a tool with no friendly renderer so the verbose fallback dumps the
+    # arguments verbatim and the body actually overflows.
     decision = await_result(
         manager.require(
-            _request(arguments={"legs": "x" * (signal_mod._BODY_LIMIT + 1)})
+            _request(
+                tool_name="place_option_combo_order",
+                arguments={"legs": "x" * (signal_mod._BODY_LIMIT + 1)},
+            )
         )
     )
 
@@ -211,22 +216,155 @@ def test_timeout_returns_expired(monkeypatch: pytest.MonkeyPatch) -> None:
     assert manager._pending == {}
 
 
-def test_build_body_includes_args_and_instructions() -> None:
-    manager = SignalApprovalManager(
-        SignalApprovalSettings(
-            api_url="http://127.0.0.1:8080",
-            account="+15555550100",
-            approver_numbers=frozenset({"+15555550199"}),
+def _settings(**overrides: Any) -> SignalApprovalSettings:
+    base: dict[str, Any] = {
+        "api_url": "http://127.0.0.1:8080",
+        "account": "+15555550100",
+        "approver_numbers": frozenset({"+15555550199"}),
+    }
+    base.update(overrides)
+    return SignalApprovalSettings(**base)
+
+
+def _equity_args(**overrides: Any) -> dict[str, str]:
+    """Build a JSON-encoded place_equity_order arguments dict, matching the
+    shape produced by `_format_argument` in tools/_registration.py."""
+    base: dict[str, Any] = {
+        "account_hash": "…5805",
+        "symbol": "SCHP",
+        "quantity": 1,
+        "instruction": "BUY",
+        "order_type": "MARKET",
+        "session": "NORMAL",
+        "duration": "DAY",
+    }
+    base.update(overrides)
+    import json as _json
+
+    return {k: _json.dumps(v) for k, v in base.items()}
+
+
+def test_render_body_friendly_format_for_place_equity_order_with_account_name() -> None:
+    manager = SignalApprovalManager(_settings(account_names={"5805": "Rollover IRA"}))
+    body = manager._render_body(_request(arguments=_equity_args()))
+
+    assert (
+        body == "Claude Trader wants to buy 1 SCHP in the Rollover IRA account. "
+        '(Market, Day)\n\nReply "ok" to approve or "no" to deny.'
+    )
+
+
+def test_render_body_falls_back_to_account_last4_when_unmapped() -> None:
+    manager = SignalApprovalManager(_settings())
+    body = manager._render_body(_request(arguments=_equity_args()))
+
+    assert "in account …5805" in body
+    assert "Claude Trader wants to buy" in body
+
+
+def test_render_body_renders_limit_with_price() -> None:
+    manager = SignalApprovalManager(_settings(account_names={"5805": "Rollover IRA"}))
+    body = manager._render_body(
+        _request(
+            arguments=_equity_args(
+                instruction="SELL",
+                quantity=200,
+                symbol="ULTY",
+                order_type="LIMIT",
+                price=12.34,
+                duration="GOOD_TILL_CANCEL",
+            )
         )
     )
-    body = manager._build_body(
-        _request(client_id="client-123"),
-        signal_mod.format_arguments({"symbol": '"NVDA"'}),
+
+    assert "sell 200 ULTY" in body
+    assert "Limit @ $12.34" in body
+    assert "GTC" in body
+
+
+def test_render_body_renders_stop_limit_with_both_prices() -> None:
+    manager = SignalApprovalManager(_settings())
+    body = manager._render_body(
+        _request(
+            arguments=_equity_args(
+                order_type="STOP_LIMIT",
+                stop_price=25.00,
+                price=24.50,
+            )
+        )
     )
-    assert "place_equity_order" in body
-    assert "client-123" in body
-    assert 'symbol = "NVDA"' in body
+
+    assert "Stop $25.00 → Limit $24.50" in body
+
+
+def test_render_body_includes_non_normal_session() -> None:
+    manager = SignalApprovalManager(_settings())
+    body = manager._render_body(_request(arguments=_equity_args(session="AM")))
+    assert "session: Am" in body
+
+
+def test_render_body_renders_cancel_order() -> None:
+    import json as _json
+
+    manager = SignalApprovalManager(_settings(account_names={"5805": "Rollover IRA"}))
+    body = manager._render_body(
+        _request(
+            tool_name="cancel_order",
+            arguments={
+                "account_hash": _json.dumps("…5805"),
+                "order_id": _json.dumps("1006299986057"),
+            },
+        )
+    )
+
+    assert (
+        "Claude Trader wants to cancel order 1006299986057 in the Rollover "
+        "IRA account." in body
+    )
+
+
+def test_render_body_falls_back_to_verbose_for_unknown_tool() -> None:
+    manager = SignalApprovalManager(_settings())
+    body = manager._render_body(
+        _request(
+            tool_name="place_option_combo_order",
+            arguments={"legs": '["a","b"]'},
+        )
+    )
+
+    assert "Claude Trader wants to call: place_option_combo_order" in body
+    assert "legs = " in body
     assert '"ok" to approve' in body
+
+
+def test_render_body_recovers_from_renderer_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bug in a per-tool renderer must never block approvals — the verbose
+    fallback always runs."""
+
+    def boom(args: Any, account_names: Any) -> str:
+        raise RuntimeError("intentional")
+
+    monkeypatch.setitem(signal_mod._TOOL_RENDERERS, "place_equity_order", boom)
+    manager = SignalApprovalManager(_settings())
+    body = manager._render_body(_request(arguments=_equity_args()))
+
+    assert "Claude Trader wants to call: place_equity_order" in body
+
+
+def test_parse_account_names_handles_comma_split_and_repeats() -> None:
+    parsed = SignalApprovalManager.parse_account_names(
+        ["5805=Rollover IRA, 71F7=Roth IRA", "  ", "5805=Rollover IRA v2"]
+    )
+    assert dict(parsed) == {"5805": "Rollover IRA v2", "71F7": "Roth IRA"}
+
+
+def test_parse_account_names_skips_malformed_entries() -> None:
+    parsed = SignalApprovalManager.parse_account_names(
+        ["bogus", "=missing-key", "missing-value=", "5805=OK"]
+    )
+    assert dict(parsed) == {"5805": "OK"}
 
 
 def test_authorized_numbers_normalizes() -> None:

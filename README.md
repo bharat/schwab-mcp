@@ -89,6 +89,7 @@ You can configure the server using CLI flags or Environment Variables.
 | `--discord-token` | `SCHWAB_MCP_DISCORD_TOKEN` | Discord bot token for trade approvals. |
 | `--signal-account` | `SCHWAB_MCP_SIGNAL_ACCOUNT` | E.164 number the local signal-cli daemon is registered as. |
 | `--signal-approver` | `SCHWAB_MCP_SIGNAL_APPROVERS` | E.164 number allowed to approve trades (repeatable). |
+| `--signal-account-name` | `SCHWAB_MCP_SIGNAL_ACCOUNT_NAMES` | Friendly name for an account in approval messages, keyed by the last 4 chars of its hash (e.g. `5805=Rollover IRA`). Repeatable or comma-separated. |
 | `--token-path` | N/A | Path to save/load token (default: `~/.local/share/...`). |
 | `--jesus-take-the-wheel`| N/A | **DANGER**. Bypasses approval for trades. |
 | `--no-technical-tools` | N/A | Disables technical analysis tools (SMA, RSI, etc.). |

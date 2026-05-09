@@ -58,6 +58,31 @@ and its arguments. **Reply to that message** (long-press → Reply) with `ok` to
 approve or `no` to deny. Anything else, or no reply within `--signal-timeout`
 seconds (default 600), is treated as a denial.
 
+> **Important — `signal-cli-rest-api` must run in `MODE=json-rpc`.** schwab-mcp
+> connects to `/v1/receive/<account>` over WebSocket; the `native` mode of the
+> REST API serves that endpoint as HTTP long-poll only and the WebSocket
+> handshake fails (HTTP 200 instead of 101). The receive loop will reconnect
+> indefinitely without ever seeing your replies. Pass `-e MODE=json-rpc` to
+> the container.
+
+## Friendly account names in approval messages
+
+By default approval messages refer to accounts by the last 4 chars of their
+account hash (e.g. `account …5805`). Pass `--signal-account-name` (or
+`SCHWAB_MCP_SIGNAL_ACCOUNT_NAMES`) to render a human-readable label instead:
+
+```bash
+schwab-mcp server \
+  ... \
+  --signal-account-name 5805='Rollover IRA' \
+  --signal-account-name 71F7='Roth IRA'
+# or, equivalently:
+SCHWAB_MCP_SIGNAL_ACCOUNT_NAMES='5805=Rollover IRA,71F7=Roth IRA' schwab-mcp server ...
+```
+
+The mapping is keyed by the **last 4 characters of the account hash** (which
+is what shows up in the redacted argument), not the Schwab account number.
+
 You may not configure Discord and Signal approvals at the same time; the
 server wires exactly one approval backend.
 
