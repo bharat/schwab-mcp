@@ -274,6 +274,18 @@ def auth(
     help="Seconds to wait for Signal approval before timing out.",
 )
 @click.option(
+    "--signal-account-name",
+    type=str,
+    multiple=True,
+    envvar="SCHWAB_MCP_SIGNAL_ACCOUNT_NAMES",
+    help=(
+        "Friendly name to display in approval messages for an account, "
+        "keyed by the last 4 chars of its hash. Format: 'last4=Name'. "
+        "Pass multiple times or as a comma-separated env value "
+        "(e.g. '5805=Rollover IRA,71F7=Roth IRA')."
+    ),
+)
+@click.option(
     "--json",
     "json_output",
     default=False,
@@ -295,6 +307,7 @@ def server(
     signal_account: str | None,
     signal_approver: tuple[str, ...],
     signal_timeout: int,
+    signal_account_name: tuple[str, ...],
     no_technical_tools: bool,
     json_output: bool,
 ) -> int:
@@ -437,6 +450,9 @@ def server(
                     account=signal_account,
                     approver_numbers=approver_numbers,
                     timeout_seconds=float(signal_timeout),
+                    account_names=SignalApprovalManager.parse_account_names(
+                        signal_account_name
+                    ),
                 )
             )
             allow_write = True
