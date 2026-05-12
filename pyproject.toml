@@ -75,5 +75,11 @@ venv = ".venv"
 reportMissingImports = false
 typeCheckingMode = "basic"
 
+[tool.uv]
+# Supply-chain hygiene: refuse to resolve any package version less than 14 days
+# old. Mirrors `minimumReleaseAge` in renovate.json so local/CI `uv lock`
+# respects the same gate as PR creation.
+exclude-newer = "14 days"
+
 [tool.uv.sources]
 schwab-py = { git = "https://github.com/jkoelker/schwab-py.git", rev = "proxy_support" }
