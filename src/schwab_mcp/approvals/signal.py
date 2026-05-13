@@ -396,6 +396,58 @@ def _render_place_equity_order(
     )
 
 
+def _parse_occ_symbol(symbol: str) -> tuple[str, str, str, str] | None:
+    """Parse an OCC option symbol into (underlying, expiry MM/DD/YYYY, C|P, strike).
+
+    OCC format: 6-char underlying (space-padded) + YYMMDD + C/P + 8-digit strike
+    (strike × 1000). Returns None if the symbol doesn't match.
+    """
+    if not isinstance(symbol, str) or len(symbol) < 16:
+        return None
+    underlying = symbol[0:6].strip()
+    yy, mm, dd = symbol[6:8], symbol[8:10], symbol[10:12]
+    cp = symbol[12:13].upper()
+    strike_raw = symbol[13:]
+    if not (
+        underlying
+        and yy.isdigit()
+        and mm.isdigit()
+        and dd.isdigit()
+        and cp in ("C", "P")
+        and strike_raw.isdigit()
+    ):
+        return None
+    expiry = f"{mm}/{dd}/20{yy}"
+    strike_val = int(strike_raw) / 1000
+    strike = f"${strike_val:,.2f}" if strike_val % 1 else f"${strike_val:,.0f}"
+    return underlying, expiry, cp, strike
+
+
+def _render_place_option_order(
+    args: Mapping[str, Any], account_names: Mapping[str, str]
+) -> str:
+    raw_instruction = str(args.get("instruction") or "").upper()
+    instruction = raw_instruction.lower().replace("_", " ") or "trade"
+    qty = args.get("quantity") or "?"
+    symbol = str(args.get("symbol") or "?")
+    account = _account_label(args.get("account_hash"), account_names)
+    descriptor = _order_descriptor(args)
+
+    parsed = _parse_occ_symbol(symbol)
+    if parsed is not None:
+        underlying, expiry, cp, strike = parsed
+        kind = "Call" if cp == "C" else "Put"
+        contract_word = "contract" if qty == 1 else "contracts"
+        body = (
+            f"{instruction} {qty} {underlying} {expiry} {strike} {kind} {contract_word}"
+        )
+    else:
+        # Fallback: use the raw symbol if it's not OCC-formatted.
+        body = f"{instruction} {qty} {symbol}"
+
+    return f"{_AGENT_NAME} wants to {body} in {account}. {descriptor}"
+
+
 def _render_cancel_order(
     args: Mapping[str, Any], account_names: Mapping[str, str]
 ) -> str:
@@ -404,9 +456,84 @@ def _render_cancel_order(
     return f"{_AGENT_NAME} wants to cancel order {order_id} in {account}."
 
 
+def _render_place_option_order_with_fishing(
+    args: Mapping[str, Any], account_names: Mapping[str, str]
+) -> str:
+    raw_instruction = str(args.get("instruction") or "").upper()
+    instruction = raw_instruction.lower().replace("_", " ") or "trade"
+    qty = args.get("quantity") or "?"
+    symbol = str(args.get("symbol") or "?")
+    account = _account_label(args.get("account_hash"), account_names)
+
+    range_start = _format_money(args.get("range_start"))
+    range_end = _format_money(args.get("range_end"))
+    step = _format_money(args.get("step"))
+
+    parsed = _parse_occ_symbol(symbol)
+    if parsed is not None:
+        underlying, expiry, cp, strike = parsed
+        kind = "Call" if cp == "C" else "Put"
+        contract_word = "contract" if qty == 1 else "contracts"
+        contract_desc = f"{underlying} {expiry} {strike} {kind} {contract_word}"
+    else:
+        contract_desc = f"option {symbol}"
+
+    chunks = args.get("chunks")
+    if isinstance(chunks, list) and chunks:
+        chunks_desc = f"chunks {'/'.join(str(c) for c in chunks)}"
+    else:
+        chunks_desc = "auto-chunked"
+
+    pattern = str(args.get("pattern") or "random_walk")
+    step_interval = args.get("step_interval_seconds")
+    jitter = args.get("timing_jitter_pct")
+
+    timing_parts = []
+    if step_interval is not None:
+        try:
+            timing_parts.append(f"~{int(float(step_interval))}s interval")
+        except (TypeError, ValueError):
+            pass
+    if jitter is not None:
+        try:
+            jitter_pct = int(round(float(jitter) * 100))
+            if jitter_pct > 0:
+                timing_parts.append(f"±{jitter_pct}% jitter")
+        except (TypeError, ValueError):
+            pass
+    timing_desc = ", ".join(timing_parts) if timing_parts else ""
+
+    range_desc_parts = [f"fishing {range_start or '?'} → {range_end or '?'}"]
+    if step:
+        range_desc_parts.append(f"step {step}")
+    range_desc_parts.append(chunks_desc)
+    range_desc_parts.append(f"pattern: {pattern}")
+    if timing_desc:
+        range_desc_parts.append(timing_desc)
+
+    range_descriptor = "(" + ", ".join(range_desc_parts) + ")"
+
+    return (
+        f"{_AGENT_NAME} wants to {instruction} {qty} {contract_desc} in "
+        f"{account}. {range_descriptor}. One approval covers the whole campaign — "
+        f"auto-adjusts within range."
+    )
+
+
+def _render_cancel_fishing(
+    args: Mapping[str, Any], account_names: Mapping[str, str]
+) -> str:
+    _ = account_names  # unused
+    campaign_id = args.get("campaign_id") or "?"
+    return f"{_AGENT_NAME} wants to cancel fishing campaign {campaign_id} (stops loop + cancels any open sub-orders)."
+
+
 _TOOL_RENDERERS: Mapping[str, Any] = {
     "place_equity_order": _render_place_equity_order,
+    "place_option_order": _render_place_option_order,
+    "place_option_order_with_fishing": _render_place_option_order_with_fishing,
     "cancel_order": _render_cancel_order,
+    "cancel_fishing": _render_cancel_fishing,
 }
 
 
