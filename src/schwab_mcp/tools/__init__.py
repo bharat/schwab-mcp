@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from schwab.client import AsyncClient
 
 from schwab_mcp.tools import account as _account
+from schwab_mcp.tools import fishing as _fishing
 from schwab_mcp.tools import history as _history
 from schwab_mcp.tools import options as _options
 from schwab_mcp.tools import orders as _orders
@@ -27,6 +28,7 @@ _TOOL_MODULES = (
     _orders,
     _quotes,
     _txns,
+    _fishing,
 )
 
 
