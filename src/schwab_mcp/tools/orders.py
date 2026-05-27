@@ -69,6 +69,79 @@ _EQUITY_INSTRUCTIONS = frozenset({"BUY", "SELL"})
 _TRAILING_STOP_LINK_TYPES = frozenset({"VALUE", "PERCENT"})
 
 
+class UnsupportedAssetTypeError(ValueError):
+    """Raised when a place_*_order tool is invoked with a symbol whose assetType is not supported by Schwab's order endpoint.
+
+    Schwab's /trader/v1/.../orders endpoint accepts only EQUITY and OPTION as
+    assetType values on the order leg instrument (verified empirically against
+    the live API on 2026-05-27, see issue #29). Sending an equity-shaped payload
+    for a non-equity symbol (e.g. a mutual fund) returns a generic 500 from the
+    upstream API. This pre-check turns that into a clear, actionable error
+    surfaced at the MCP boundary.
+    """
+
+    def __init__(
+        self, *, symbol: str, resolved_type: str, supported: tuple[str, ...]
+    ) -> None:
+        if resolved_type == "MUTUAL_FUND":
+            hint = " For mutual fund orders, use Schwab.com Trade > Mutual Funds."
+        elif resolved_type == "FIXED_INCOME":
+            hint = " For fixed income orders, use Schwab.com Trade > Bonds."
+        else:
+            hint = ""
+        super().__init__(
+            f"Schwab's Trader API does not support {resolved_type} orders on this"
+            f" endpoint. The symbol {symbol!r} resolves to assetType"
+            f" {resolved_type}, but this tool only supports"
+            f" {', '.join(supported)}.{hint}"
+        )
+        self.symbol = symbol
+        self.resolved_type = resolved_type
+        self.supported = supported
+
+
+async def _resolve_symbol_asset_type(client: Any, symbol: str) -> str | None:
+    """Look up a symbol's assetType via the Schwab instruments endpoint.
+
+    Returns None if the lookup fails for any reason (network error, unknown
+    symbol, malformed response), so the caller falls back to letting the
+    upstream API validate. This intentionally avoids adding new failure modes
+    to the order path; if pre-validation cannot answer cleanly, the order
+    proceeds and the existing error-handling path takes over.
+    """
+    try:
+        response = await client.get_instruments(symbol, "symbol-search")
+        response.raise_for_status()
+        data = response.json()
+    except Exception:  # noqa: BLE001 - graceful degradation by design
+        return None
+    instruments = data.get("instruments") if isinstance(data, dict) else None
+    if not instruments or not isinstance(instruments, list):
+        return None
+    first = instruments[0]
+    if not isinstance(first, dict):
+        return None
+    asset_type = first.get("assetType")
+    return asset_type if isinstance(asset_type, str) else None
+
+
+async def _require_supported_asset_type(
+    client: Any, symbol: str, supported: tuple[str, ...]
+) -> None:
+    """Reject an order upfront if the symbol resolves to an unsupported assetType.
+
+    If the lookup cannot determine the assetType, the check passes silently and
+    the upstream API will validate. Only raises when the lookup succeeds AND
+    the resolved type is not in the supported set.
+    """
+    resolved = await _resolve_symbol_asset_type(client, symbol)
+    if resolved is None or resolved in supported:
+        return
+    raise UnsupportedAssetTypeError(
+        symbol=symbol, resolved_type=resolved, supported=supported
+    )
+
+
 def _build_equity_order_spec(
     symbol: str,
     quantity: int,
@@ -330,6 +403,11 @@ async def place_equity_order(
     # Build the core order specification builder
     client = ctx.orders
 
+    # Reject mutual fund (and other unsupported) symbols upfront. Schwab's
+    # /orders endpoint only accepts EQUITY and OPTION assetType values; sending
+    # an equity-shaped payload for a non-equity symbol returns a generic 500.
+    await _require_supported_asset_type(ctx.tools, symbol, supported=("EQUITY",))
+
     order_spec_builder = _build_equity_order_spec(
         symbol, quantity, instruction, order_type, price, stop_price
     )
@@ -428,6 +506,9 @@ async def place_equity_trailing_stop_order(
     *Write operation.*
     """
     client = ctx.orders
+
+    # See place_equity_order: reject unsupported assetType symbols upfront.
+    await _require_supported_asset_type(ctx.tools, symbol, supported=("EQUITY",))
 
     order_spec_builder = _build_trailing_stop_order_spec(
         symbol,

@@ -21,10 +21,16 @@ class SchwabAPIError(Exception):
         status_code: int,
         url: str,
         body: str,
+        correlation_id: str | None = None,
     ) -> None:
+        suffix = f"; correlid={correlation_id}" if correlation_id else ""
         super().__init__(
-            f"Schwab API request failed; status={status_code}; url={url}; body={body}"
+            f"Schwab API request failed; status={status_code}; url={url}; body={body}{suffix}"
         )
+        self.status_code = status_code
+        self.url = url
+        self.body = body
+        self.correlation_id = correlation_id
 
 
 def parse_date(value: str | datetime.date | None) -> datetime.date | None:
@@ -83,10 +89,15 @@ async def call(
                 if raw
                 else f"HTTP {response.status_code}"
             )
+        headers = getattr(response, "headers", None)
+        correlation_id = (
+            headers.get("Schwab-Client-CorrelId") if headers is not None else None
+        )
         raise SchwabAPIError(
             status_code=response.status_code,
             url=response.url,
             body=body,
+            correlation_id=correlation_id,
         ) from exc
 
     if response_handler is not None:
