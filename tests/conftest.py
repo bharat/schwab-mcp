@@ -106,17 +106,54 @@ def order_response_factory():
     return factory
 
 
+class DummyInstrumentsResponse:
+    """Mock HTTP response for get_instruments lookup.
+
+    Defaults to a single EQUITY-typed instrument so order tests that do not
+    explicitly exercise the asset-type validator continue to pass through.
+    """
+
+    def __init__(self, symbol: str = "TEST", asset_type: str | None = "EQUITY") -> None:
+        self.status_code = 200
+        instruments: list[dict[str, Any]] = []
+        if asset_type is not None:
+            instruments.append({"symbol": symbol, "assetType": asset_type})
+        self._payload = {"instruments": instruments}
+        self.headers: dict[str, str] = {}
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> Any:
+        return self._payload
+
+
 class DummyPlaceOrderClient:
-    """Mock client for place_order() method testing."""
+    """Mock client for place_order() method testing.
+
+    Also stubs `get_instruments` so the upfront asset-type validator added by
+    issue #29 returns EQUITY for any looked-up symbol by default. Tests that
+    want to exercise the rejection path can set
+    `client.asset_type_override = "MUTUAL_FUND"` (or any other value), or set
+    `client.asset_type_override = "raise"` to simulate a lookup failure.
+    """
 
     def __init__(self, order_response: Any):
         self.captured: dict[str, Any] | None = None
         self._response = order_response
+        self.asset_type_override: str | None = "EQUITY"
 
     async def place_order(self, *args: Any, **kwargs: Any) -> Any:
         """Capture call arguments and return mock response."""
         self.captured = {"args": args, "kwargs": kwargs}
         return self._response
+
+    async def get_instruments(self, symbol: str, projection: Any) -> Any:  # noqa: ARG002
+        if self.asset_type_override == "raise":
+            raise RuntimeError("simulated get_instruments failure")
+        return DummyInstrumentsResponse(
+            symbol=symbol, asset_type=self.asset_type_override
+        )
 
 
 @pytest.fixture

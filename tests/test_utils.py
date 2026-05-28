@@ -15,6 +15,7 @@ class MockResponse:
         content: bytes = b"",
         json_data: dict | list | None = None,
         raise_error: bool = False,
+        headers: dict[str, str] | None = None,
     ) -> None:
         self.status_code = status_code
         self.url = url
@@ -22,6 +23,7 @@ class MockResponse:
         self.content = content
         self._json_data = json_data
         self._raise_error = raise_error
+        self.headers = headers if headers is not None else {}
 
     def raise_for_status(self) -> None:
         if self._raise_error:
@@ -121,6 +123,39 @@ class TestSchwabAPIError:
             run(call(fake_endpoint))
 
         assert exc_info.value.__cause__ is not None
+
+    def test_surfaces_schwab_client_correlid_when_present(self):
+        async def fake_endpoint():
+            return MockResponse(
+                status_code=500,
+                url="https://api.schwabapi.com/orders",
+                text='{"message":"upstream boom"}',
+                raise_error=True,
+                headers={"Schwab-Client-CorrelId": "abc-123-def-456"},
+            )
+
+        with pytest.raises(SchwabAPIError) as exc_info:
+            run(call(fake_endpoint))
+
+        error = exc_info.value
+        assert error.correlation_id == "abc-123-def-456"
+        assert "correlid=abc-123-def-456" in str(error)
+
+    def test_correlid_absent_when_header_missing(self):
+        async def fake_endpoint():
+            return MockResponse(
+                status_code=500,
+                url="https://api.schwabapi.com/orders",
+                text="boom",
+                raise_error=True,
+            )
+
+        with pytest.raises(SchwabAPIError) as exc_info:
+            run(call(fake_endpoint))
+
+        error = exc_info.value
+        assert error.correlation_id is None
+        assert "correlid=" not in str(error)
 
 
 class TestResponseHandler:

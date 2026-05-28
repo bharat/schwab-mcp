@@ -241,6 +241,93 @@ class TestPlaceEquityOrder:
         assert order_spec["session"] == "AM"
         assert order_spec["duration"] == "GOOD_TILL_CANCEL"
 
+    def test_rejects_mutual_fund_symbol_before_placing(
+        self, place_order_client, account_hash
+    ):
+        place_order_client.asset_type_override = "MUTUAL_FUND"
+        ctx = make_ctx(place_order_client)
+
+        with pytest.raises(orders.UnsupportedAssetTypeError) as excinfo:
+            run(
+                orders.place_equity_order(
+                    ctx,
+                    account_hash,
+                    "LENDX",
+                    109,
+                    "sell",
+                    "market",
+                )
+            )
+
+        # No order was placed at the upstream API; the rejection short-circuits.
+        assert place_order_client.captured is None
+        err = excinfo.value
+        assert err.symbol == "LENDX"
+        assert err.resolved_type == "MUTUAL_FUND"
+        assert err.supported == ("EQUITY",)
+        assert "Schwab.com" in str(err)
+
+    def test_rejects_fixed_income_symbol_before_placing(
+        self, place_order_client, account_hash
+    ):
+        place_order_client.asset_type_override = "FIXED_INCOME"
+        ctx = make_ctx(place_order_client)
+
+        with pytest.raises(orders.UnsupportedAssetTypeError):
+            run(
+                orders.place_equity_order(
+                    ctx,
+                    account_hash,
+                    "912828YY0",
+                    1,
+                    "sell",
+                    "market",
+                )
+            )
+        assert place_order_client.captured is None
+
+    def test_passes_through_when_lookup_fails(
+        self, place_order_client, account_hash, order_id
+    ):
+        """Graceful degradation: a lookup error must not block the order."""
+        place_order_client.asset_type_override = "raise"
+        ctx = make_ctx(place_order_client)
+
+        result = run(
+            orders.place_equity_order(
+                ctx,
+                account_hash,
+                "AAPL",
+                100,
+                "buy",
+                "market",
+            )
+        )
+
+        assert result["orderId"] == order_id
+        assert place_order_client.captured is not None
+
+    def test_passes_through_when_lookup_returns_no_instruments(
+        self, place_order_client, account_hash, order_id
+    ):
+        """An empty `instruments` list is also treated as a non-result."""
+        place_order_client.asset_type_override = None
+        ctx = make_ctx(place_order_client)
+
+        result = run(
+            orders.place_equity_order(
+                ctx,
+                account_hash,
+                "AAPL",
+                100,
+                "buy",
+                "market",
+            )
+        )
+
+        assert result["orderId"] == order_id
+        assert place_order_client.captured is not None
+
 
 class TestPlaceOptionOrder:
     @pytest.fixture
@@ -397,6 +484,26 @@ class TestPlaceEquityTrailingStopOrder:
 
         order_spec = place_order_client.captured["kwargs"]["order_spec"]
         assert order_spec["stopPriceLinkType"] == "VALUE"
+
+    def test_rejects_mutual_fund_symbol_before_placing(
+        self, place_order_client, account_hash
+    ):
+        place_order_client.asset_type_override = "MUTUAL_FUND"
+        ctx = make_ctx(place_order_client)
+
+        with pytest.raises(orders.UnsupportedAssetTypeError):
+            run(
+                orders.place_equity_trailing_stop_order(
+                    ctx,
+                    account_hash,
+                    "LENDX",
+                    50,
+                    "SELL",
+                    5.00,
+                )
+            )
+
+        assert place_order_client.captured is None
 
 
 class TestPlaceBracketOrder:
