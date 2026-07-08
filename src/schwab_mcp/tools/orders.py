@@ -172,6 +172,15 @@ _EQUITY_ORDER_BUILDERS: dict[tuple[str, str], tuple[Any, bool, bool]] = {
 _EQUITY_ORDER_TYPES = frozenset({"MARKET", "LIMIT", "STOP", "STOP_LIMIT"})
 _EQUITY_INSTRUCTIONS = frozenset({"BUY", "SELL"})
 
+# Asset types (as returned by the instruments symbol-search endpoint) that are
+# placeable as EQUITY legs on Schwab's /orders endpoint. The instruments
+# endpoint labels exchange-traded funds "ETF" (and account position payloads
+# label them "COLLECTIVE_INVESTMENT"), but the order endpoint accepts them
+# exactly like common stock; verified live 2026-07-07 with VTI, which
+# symbol-search resolves to ETF. Only truly unsupported types (MUTUAL_FUND,
+# FIXED_INCOME, ...) should be rejected upfront.
+_EQUITY_ORDERABLE_ASSET_TYPES = ("EQUITY", "ETF", "COLLECTIVE_INVESTMENT")
+
 _TRAILING_STOP_LINK_TYPES = frozenset({"VALUE", "PERCENT"})
 
 
@@ -531,7 +540,9 @@ async def place_equity_order(
     # Reject mutual fund (and other unsupported) symbols upfront. Schwab's
     # /orders endpoint only accepts EQUITY and OPTION assetType values; sending
     # an equity-shaped payload for a non-equity symbol returns a generic 500.
-    await _require_supported_asset_type(ctx.tools, symbol, supported=("EQUITY",))
+    await _require_supported_asset_type(
+        ctx.tools, symbol, supported=_EQUITY_ORDERABLE_ASSET_TYPES
+    )
 
     order_spec_builder = _build_equity_order_spec(
         symbol, quantity, instruction, order_type, price, stop_price
@@ -633,7 +644,9 @@ async def place_equity_trailing_stop_order(
     client = ctx.orders
 
     # See place_equity_order: reject unsupported assetType symbols upfront.
-    await _require_supported_asset_type(ctx.tools, symbol, supported=("EQUITY",))
+    await _require_supported_asset_type(
+        ctx.tools, symbol, supported=_EQUITY_ORDERABLE_ASSET_TYPES
+    )
 
     order_spec_builder = _build_trailing_stop_order_spec(
         symbol,

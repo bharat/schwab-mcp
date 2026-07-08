@@ -516,7 +516,7 @@ class TestPlaceEquityOrder:
         err = excinfo.value
         assert err.symbol == "LENDX"
         assert err.resolved_type == "MUTUAL_FUND"
-        assert err.supported == ("EQUITY",)
+        assert err.supported == orders._EQUITY_ORDERABLE_ASSET_TYPES
         assert "Schwab.com" in str(err)
 
     def test_rejects_fixed_income_symbol_before_placing(
@@ -537,6 +537,37 @@ class TestPlaceEquityOrder:
                 )
             )
         assert place_order_client.captured is None
+
+    @pytest.mark.parametrize("etf_asset_type", ["ETF", "COLLECTIVE_INVESTMENT"])
+    def test_accepts_etf_symbols(
+        self, place_order_client, account_hash, order_id, etf_asset_type
+    ):
+        """ETFs place as EQUITY legs on /orders and must not be rejected.
+
+        Schwab's instruments symbol-search resolves ETFs to assetType "ETF"
+        (position payloads use "COLLECTIVE_INVESTMENT"); the order endpoint
+        accepts them exactly like common stock. Regression test for the guard
+        wrongly rejecting VTI (found live 2026-07-07).
+        """
+        place_order_client.asset_type_override = etf_asset_type
+        ctx = make_ctx(place_order_client)
+
+        result = run(
+            orders.place_equity_order(
+                ctx,
+                account_hash,
+                "VTI",
+                40,
+                "buy",
+                "market",
+            )
+        )
+
+        assert result["orderId"] == order_id
+        captured = place_order_client.captured
+        assert captured is not None
+        order_spec = captured["kwargs"]["order_spec"]
+        assert order_spec["orderLegCollection"][0]["instrument"]["symbol"] == "VTI"
 
     def test_passes_through_when_lookup_fails(
         self, place_order_client, account_hash, order_id
