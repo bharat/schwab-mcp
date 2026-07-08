@@ -30,6 +30,37 @@ def _normalize_option_symbol(symbol: str) -> str:
     return f"{root:<6}{date}{typ}{strike_padded}"
 
 
+_COMPACT_QUOTE_FIELDS = (
+    "lastPrice",
+    "bidPrice",
+    "askPrice",
+    "mark",
+    "netChange",
+    "netPercentChange",
+    "highPrice",
+    "lowPrice",
+    "totalVolume",
+)
+
+
+def _prune_quote(symbol_key: str, entry: dict[str, JSONType]) -> dict[str, JSONType]:
+    result: dict[str, JSONType] = {"symbol": entry.get("symbol", symbol_key)}
+    quote_sub = entry.get("quote", {})
+    if isinstance(quote_sub, dict):
+        for k in _COMPACT_QUOTE_FIELDS:
+            if k in quote_sub:
+                result[k] = quote_sub[k]
+    return result
+
+
+def _prune_quotes(payload: JSONType) -> JSONType:
+    if not isinstance(payload, dict):
+        return payload
+    return {
+        k: _prune_quote(k, v) if isinstance(v, dict) else v for k, v in payload.items()
+    }
+
+
 async def get_quotes(
     ctx: SchwabContext,
     symbols: Annotated[
@@ -43,10 +74,15 @@ async def get_quotes(
     indicative: Annotated[
         bool | None, "True for indicative quotes (extended hours/futures)"
     ] = None,
+    verbose: Annotated[
+        bool,
+        "Return the full raw payload (quote/fundamental/reference/regular blocks) instead of the compact default.",
+    ] = False,
 ) -> JSONType:
     """
     Returns current market quotes for specified symbols (stocks, ETFs, indices, options).
     Params: symbols (list or comma-separated string), fields (list/str: QUOTE/FUNDAMENTAL/etc.), indicative (bool).
+    By default returns compact quote fields only (lastPrice, bidPrice, askPrice, mark, netChange, netPercentChange, highPrice, lowPrice, totalVolume); pass verbose=True for the full raw payload.
     """
     client = ctx.quotes
 
@@ -61,12 +97,13 @@ async def get_quotes(
             fields = [f.strip() for f in fields.split(",")]
         field_enums = [client.Quote.Fields[f.upper()] for f in fields]
 
-    return await call(
+    result = await call(
         client.get_quotes,
         symbols,
         fields=field_enums,
         indicative=indicative if indicative is not None else None,
     )
+    return result if verbose else _prune_quotes(result)
 
 
 _READ_ONLY_TOOLS = (get_quotes,)

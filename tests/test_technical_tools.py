@@ -109,7 +109,7 @@ def test_sma_returns_expected_values(monkeypatch, dummy_ctx, price_data):
         assert row["sma_3"] == pytest.approx(float(expected_value))
 
 
-def test_ema_defaults_to_length_points(monkeypatch, dummy_ctx, price_data):
+def test_ema_defaults_to_default_points(monkeypatch, dummy_ctx, price_data):
     frame, metadata = price_data
 
     async def fake_fetch(ctx, symbol, **kwargs):
@@ -126,12 +126,12 @@ def test_ema_defaults_to_length_points(monkeypatch, dummy_ctx, price_data):
         SimpleNamespace(ema=fake_ema),
     )
 
-    result = run_tool(moving_average.ema(dummy_ctx, "HOOD", length=4))
+    result = run_tool(moving_average.ema(dummy_ctx, "HOOD", length=5))
 
     values = result["values"]
-    assert len(values) == 4
-    last_value = frame["close"].ewm(span=4, adjust=False).mean().iloc[-1]
-    assert values[-1]["ema_4"] == pytest.approx(float(last_value))
+    assert len(values) == base.DEFAULT_POINTS
+    last_value = frame["close"].ewm(span=5, adjust=False).mean().iloc[-1]
+    assert values[-1]["ema_5"] == pytest.approx(float(last_value))
 
 
 def test_rsi_returns_expected_values(monkeypatch, dummy_ctx, price_data):
@@ -252,41 +252,59 @@ def test_vwap_requires_positive_volume(monkeypatch, dummy_ctx, ohlcv_data):
 
 
 def test_pivot_points_returns_levels(monkeypatch, dummy_ctx, ohlcv_data):
+    # pandas_ta_classic has no pivot_points implementation (confirmed empty on
+    # 0.3.59), so this indicator is computed directly rather than delegated —
+    # no pandas_ta monkeypatch needed here, unlike the other overlay tools.
     frame, metadata = ohlcv_data
 
     async def fake_fetch(ctx, symbol, **kwargs):
         return frame, metadata
 
-    def fake_pivots(high, low, close, *, method="standard", lookback=None):
-        data = pd.DataFrame(
-            {
-                "pp": pd.Series([10, 11, 12, 13, 14, 15], index=close.index),
-                "r1": pd.Series([11, 12, 13, 14, 15, 16], index=close.index),
-                "s1": pd.Series([9, 10, 11, 12, 13, 14], index=close.index),
-            }
-        )
-        return data
-
     monkeypatch.setattr(base, "fetch_price_frame", fake_fetch)
-    monkeypatch.setattr(
-        overlays,
-        "pandas_ta",
-        SimpleNamespace(
-            pivot_points=fake_pivots,
-            vwap=lambda *args, **kwargs: None,
-            bbands=lambda *args, **kwargs: None,
-        ),
-    )
 
     result = run_tool(
         overlays.pivot_points(
-            dummy_ctx, "HOOD", method="standard", lookback=5, points=2
+            dummy_ctx, "HOOD", method="standard", lookback=1, points=2
         )
     )
 
     values = result["values"]
     assert len(values) == 2
-    assert {"timestamp", "pp", "r1", "s1"}.issubset(values[-1].keys())
+    assert {"timestamp", "PP", "R1", "S1", "R2", "S2", "R3", "S3"}.issubset(
+        values[-1].keys()
+    )
+
+    high = frame["high"].shift(1)
+    low = frame["low"].shift(1)
+    close = frame["close"].shift(1)
+    expected_pp = ((high + low + close) / 3).dropna().tail(2).to_numpy()
+    for row, expected in zip(values, expected_pp):
+        assert row["PP"] == pytest.approx(float(expected))
+
+
+def test_pivot_points_rejects_unknown_method(monkeypatch, dummy_ctx, ohlcv_data):
+    frame, metadata = ohlcv_data
+
+    async def fake_fetch(ctx, symbol, **kwargs):
+        return frame, metadata
+
+    monkeypatch.setattr(base, "fetch_price_frame", fake_fetch)
+
+    with pytest.raises(ValueError, match="Unsupported pivot method"):
+        run(overlays.pivot_points(dummy_ctx, "HOOD", method="bogus"))
+
+
+def test_pivot_points_demark_requires_open_column(monkeypatch, dummy_ctx, ohlcv_data):
+    frame, metadata = ohlcv_data
+    frame = frame.drop(columns=["open"])
+
+    async def fake_fetch(ctx, symbol, **kwargs):
+        return frame, metadata
+
+    monkeypatch.setattr(base, "fetch_price_frame", fake_fetch)
+
+    with pytest.raises(ValueError, match="requires an 'open' column"):
+        run(overlays.pivot_points(dummy_ctx, "HOOD", method="demark"))
 
 
 def test_bollinger_bands_returns_values(monkeypatch, dummy_ctx, price_data):
@@ -698,3 +716,95 @@ def test_expected_move_honors_custom_multiplier(monkeypatch, dummy_ctx):
 
     assert result["adjusted_move"] == pytest.approx(4.0 * 1.2)
     assert result["boundaries"]["upper_1x"] == pytest.approx(100.0 + 4.8)
+
+
+def test_sma_defaults_to_default_points_not_length(monkeypatch, dummy_ctx, price_data):
+    frame, metadata = price_data
+
+    async def fake_fetch(ctx, symbol, **kwargs):
+        return frame, metadata
+
+    def fake_sma(series, *, length):
+        return series.rolling(length, min_periods=1).mean()
+
+    monkeypatch.setattr(base, "fetch_price_frame", fake_fetch)
+    monkeypatch.setattr(
+        moving_average,
+        "pandas_ta",
+        SimpleNamespace(sma=fake_sma),
+    )
+
+    result = run_tool(moving_average.sma(dummy_ctx, "HOOD", length=5))
+
+    values = result["values"]
+    assert len(values) == base.DEFAULT_POINTS
+    last_value = frame["close"].rolling(5, min_periods=1).mean().iloc[-1]
+    assert values[-1]["sma_5"] == pytest.approx(float(last_value))
+
+
+def test_atr_defaults_to_default_points_not_length(monkeypatch, dummy_ctx, ohlcv_data):
+    frame, metadata = ohlcv_data
+
+    async def fake_fetch(ctx, symbol, **kwargs):
+        return frame, metadata
+
+    def fake_atr(high, low, close, *, length):
+        return pd.Series([1.0 + idx for idx in range(len(close))], index=close.index)
+
+    monkeypatch.setattr(base, "fetch_price_frame", fake_fetch)
+    monkeypatch.setattr(
+        trend,
+        "pandas_ta",
+        SimpleNamespace(
+            atr=fake_atr,
+            adx=lambda *args, **kwargs: None,
+            macd=lambda *args, **kwargs: None,
+        ),
+    )
+
+    result = run_tool(trend.atr(dummy_ctx, "HOOD", length=5))
+
+    values = result["values"]
+    assert len(values) == base.DEFAULT_POINTS
+    assert values[-1]["atr_5"] == pytest.approx(1.0 + len(frame) - 1)
+
+
+def test_vwap_defaults_to_default_points_not_length(monkeypatch, dummy_ctx, ohlcv_data):
+    frame, metadata = ohlcv_data
+
+    async def fake_fetch(ctx, symbol, **kwargs):
+        return frame, metadata
+
+    def fake_vwap(high, low, close, volume, *, length=None):
+        return pd.Series([100.0 + idx for idx in range(len(close))], index=close.index)
+
+    monkeypatch.setattr(overlays, "fetch_price_frame", fake_fetch)
+    monkeypatch.setattr(
+        overlays,
+        "pandas_ta",
+        SimpleNamespace(vwap=fake_vwap, pivot_points=None, bbands=None),
+    )
+
+    result = run_tool(overlays.vwap(dummy_ctx, "HOOD", length=5))
+
+    values = result["values"]
+    assert len(values) == base.DEFAULT_POINTS
+    assert values[-1]["vwap"] == pytest.approx(100.0 + len(frame) - 1)
+
+
+def test_pivot_points_defaults_to_default_points_not_lookback(
+    monkeypatch, dummy_ctx, ohlcv_data
+):
+    frame, metadata = ohlcv_data
+
+    async def fake_fetch(ctx, symbol, **kwargs):
+        return frame, metadata
+
+    monkeypatch.setattr(base, "fetch_price_frame", fake_fetch)
+
+    result = run_tool(
+        overlays.pivot_points(dummy_ctx, "HOOD", method="standard", lookback=1)
+    )
+
+    values = result["values"]
+    assert len(values) == base.DEFAULT_POINTS
