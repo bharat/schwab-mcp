@@ -9,6 +9,7 @@ from schwab.utils import (
     UnsuccessfulOrderException,
     Utils as SchwabUtils,
 )
+from schwab.orders.common import Duration
 from schwab.orders.common import first_triggers_second as trigger_builder
 from schwab.orders.common import one_cancels_other as oco_builder
 from schwab.orders.options import OptionSymbol
@@ -40,15 +41,120 @@ from schwab_mcp.tools.order_helpers import (
 from schwab_mcp.tools.utils import JSONType, ResponseHandler, call
 
 
+_COMPACT_ORDER_TOP_FIELDS = frozenset(
+    {
+        "orderId",
+        "status",
+        "quantity",
+        "filledQuantity",
+        "remainingQuantity",
+        "price",
+        "stopPrice",
+        "orderType",
+        "session",
+        "duration",
+        "orderStrategyType",
+        "enteredTime",
+        "closeTime",
+    }
+)
+
+
+def _order_legs_summary(order: dict[str, Any]) -> list[dict[str, Any]]:
+    legs = order.get("orderLegCollection", [])
+    result = []
+    for leg in legs:
+        if not isinstance(leg, dict):
+            continue
+        instrument = leg.get("instrument")
+        symbol = instrument.get("symbol") if isinstance(instrument, dict) else None
+        result.append(
+            {
+                "symbol": symbol,
+                "instruction": leg.get("instruction"),
+                "quantity": leg.get("quantity"),
+            }
+        )
+    return result
+
+
+def _prune_order(order: JSONType) -> JSONType:
+    if not isinstance(order, dict):
+        return order
+    result: dict[str, JSONType] = {
+        k: v for k, v in order.items() if k in _COMPACT_ORDER_TOP_FIELDS
+    }
+    order_legs = order.get("orderLegCollection")
+    if isinstance(order_legs, list) and order_legs:
+        legs_summary = _order_legs_summary(order)
+        if legs_summary:
+            result["legs"] = legs_summary
+    child_strategies = order.get("childOrderStrategies")
+    if isinstance(child_strategies, list) and child_strategies:
+        result["childOrderStrategies"] = [
+            _prune_order(child) for child in child_strategies
+        ]
+    return result
+
+
+def _prune_orders(payload: JSONType) -> JSONType:
+    return (
+        [_prune_order(o) for o in payload]
+        if isinstance(payload, list)
+        else _prune_order(payload)
+    )
+
+
+# Common shorthand aliases for schwab-py's Duration enum values. GTC is the
+# most frequently used trading abbreviation and is not recognized by
+# schwab-py itself; IOC/FOK are included as the same kind of well-known
+# shorthand. There is no unambiguous shorthand for END_OF_WEEK/END_OF_MONTH/
+# NEXT_END_OF_MONTH, so those are only accepted by their exact enum names.
+_DURATION_ALIASES: dict[str, str] = {
+    "GTC": "GOOD_TILL_CANCEL",
+    "IOC": "IMMEDIATE_OR_CANCEL",
+    "FOK": "FILL_OR_KILL",
+}
+
+# Derived from schwab-py's real Duration enum (rather than hardcoded) so this
+# automatically tracks any values schwab-py adds in future releases.
+_VALID_DURATIONS: frozenset[str] = frozenset(d.name for d in Duration)
+
+
+def _normalize_duration(duration: str | Duration) -> str:
+    """Resolve a duration string/alias to a canonical schwab-py Duration name.
+
+    Accepts common shorthand (e.g. ``GTC``) in addition to the exact
+    schwab-py enum names, case-insensitively. Also accepts a ``Duration``
+    enum instance directly. Raises ``ValueError`` locally (before any Schwab
+    API call) if the value isn't recognized.
+    """
+    if isinstance(duration, Duration):
+        return duration.name
+    if not isinstance(duration, str):
+        raise ValueError(
+            f"Invalid duration: {duration!r}. Must be a string or Duration enum value."
+        )
+    candidate = duration.strip().upper()
+    candidate = _DURATION_ALIASES.get(candidate, candidate)
+
+    if candidate not in _VALID_DURATIONS:
+        raise ValueError(
+            f"Invalid duration: {duration!r}. Must be one of: "
+            f"{', '.join(sorted(_VALID_DURATIONS))} "
+            f"(aliases accepted: {', '.join(sorted(_DURATION_ALIASES))})"
+        )
+
+    return candidate
+
+
 # Internal helper function to apply session and duration settings
 def _apply_order_settings(order_spec, session: str | None, duration: str | None):
     """Internal helper to apply session and duration to an order spec builder."""
     if session:
         order_spec = order_spec.set_session(session)
-    # Apply duration only if it's provided and applicable (not None)
-    # Let schwab-py or the API handle invalid duration types for specific orders
-    if duration:
-        order_spec = order_spec.set_duration(duration)
+    if duration is not None:
+        order_spec = order_spec.set_duration(_normalize_duration(duration))
     return order_spec
 
 
@@ -285,12 +391,21 @@ async def get_order(
     ctx: SchwabContext,
     account_hash: Annotated[str, "Account hash for the Schwab account"],
     order_id: Annotated[str, "Order ID to get details for"],
+    verbose: Annotated[
+        bool,
+        "Return the full raw order payload (routing metadata, full nested child orders, execution activity) instead of the compact default.",
+    ] = False,
 ) -> JSONType:
     """
-    Returns details for a specific order (ID, status, price, quantity, execution details). Params: account_hash, order_id.
+    Returns details for a specific order. By default returns compact fields only
+    (orderId, status, quantity, filledQuantity, remainingQuantity, price, stopPrice,
+    orderType, session, duration, orderStrategyType, enteredTime, closeTime, legs
+    summary, and recursively-pruned childOrderStrategies); pass verbose=True for
+    the full raw payload. Params: account_hash, order_id.
     """
     client = ctx.orders
-    return await call(client.get_order, order_id=order_id, account_hash=account_hash)
+    result = await call(client.get_order, order_id=order_id, account_hash=account_hash)
+    return result if verbose else _prune_order(result)
 
 
 async def get_orders(
@@ -308,9 +423,17 @@ async def get_orders(
         list[str] | str | None,
         "Filter by order status (e.g., WORKING, FILLED, CANCELED). See full list below.",
     ] = None,
+    verbose: Annotated[
+        bool,
+        "Return the full raw order payload (routing metadata, full nested child orders, execution activity) instead of the compact default.",
+    ] = False,
 ) -> JSONType:
     """
-    Returns order history for an account. Filter by date range (max 60 days past) and status.
+    Returns order history for an account. By default returns compact fields only
+    (orderId, status, quantity, filledQuantity, remainingQuantity, price, stopPrice,
+    orderType, session, duration, orderStrategyType, enteredTime, closeTime, legs
+    summary, and recursively-pruned childOrderStrategies); pass verbose=True for
+    the full raw payload. Filter by date range (max 60 days past) and status.
     Params: account_hash, max_results, from_date (YYYY-MM-DD), to_date (YYYY-MM-DD), status (list/str).
     Status options: AWAITING_PARENT_ORDER, AWAITING_CONDITION, AWAITING_STOP_CONDITION, AWAITING_MANUAL_REVIEW, ACCEPTED, AWAITING_UR_OUT, PENDING_ACTIVATION, QUEUED, WORKING, REJECTED, PENDING_CANCEL, CANCELED, PENDING_REPLACE, REPLACED, FILLED, EXPIRED, NEW, AWAITING_RELEASE_TIME, PENDING_ACKNOWLEDGEMENT, PENDING_RECALL.
     Use tomorrow's date as to_date for today's orders. Use WORKING/PENDING_ACTIVATION for open orders.
@@ -330,7 +453,7 @@ async def get_orders(
         if isinstance(status, str):
             # Single status: direct API call
             kwargs["status"] = client.Order.Status[status.upper()]
-            return await call(
+            result: JSONType = await call(
                 client.get_orders_for_account,
                 account_hash,
                 **kwargs,
@@ -342,24 +465,26 @@ async def get_orders(
             seen_order_ids: set[str] = set()
             for s in status:
                 kwargs["status"] = client.Order.Status[s.upper()]
-                result = await call(
+                partial = await call(
                     client.get_orders_for_account,
                     account_hash,
                     **kwargs,
                 )
-                if result:
-                    for order in cast(list[Any], result):
+                if partial:
+                    for order in cast(list[Any], partial):
                         order_id = str(order.get("orderId", ""))
                         if order_id and order_id not in seen_order_ids:
                             seen_order_ids.add(order_id)
                             all_orders.append(order)
-            return all_orders if all_orders else []
+            result = all_orders if all_orders else []
+    else:
+        result = await call(
+            client.get_orders_for_account,
+            account_hash,
+            **kwargs,
+        )
 
-    return await call(
-        client.get_orders_for_account,
-        account_hash,
-        **kwargs,
-    )
+    return result if verbose else _prune_orders(result)
 
 
 async def cancel_order(
@@ -390,7 +515,7 @@ async def place_equity_order(
     ] = "NORMAL",
     duration: Annotated[
         str | None,
-        "Order duration: DAY (default), GOOD_TILL_CANCEL, FILL_OR_KILL (Limit/StopLimit only)",
+        "Order duration: DAY (default), GOOD_TILL_CANCEL (alias: GTC), IMMEDIATE_OR_CANCEL (alias: IOC), FILL_OR_KILL (alias: FOK; Limit/StopLimit only). Invalid values raise ValueError locally.",
     ] = "DAY",
 ) -> JSONType:
     """
@@ -444,7 +569,7 @@ async def place_option_order(
     ] = "NORMAL",
     duration: Annotated[
         str | None,
-        "Order duration: DAY (default), GOOD_TILL_CANCEL, FILL_OR_KILL (Limit only)",
+        "Order duration: DAY (default), GOOD_TILL_CANCEL (alias: GTC), IMMEDIATE_OR_CANCEL (alias: IOC), FILL_OR_KILL (alias: FOK; Limit only). Invalid values raise ValueError locally.",
     ] = "DAY",
 ) -> JSONType:
     """
@@ -495,7 +620,7 @@ async def place_equity_trailing_stop_order(
     ] = "NORMAL",
     duration: Annotated[
         str | None,
-        "Order duration: DAY (default) or GOOD_TILL_CANCEL",
+        "Order duration: DAY (default), GOOD_TILL_CANCEL (alias: GTC), or IMMEDIATE_OR_CANCEL (alias: IOC). Invalid values raise ValueError locally.",
     ] = "DAY",
 ) -> JSONType:
     """
@@ -543,7 +668,7 @@ async def build_equity_order_spec(
     ] = "NORMAL",
     duration: Annotated[
         str | None,
-        "Order duration: DAY (default), GOOD_TILL_CANCEL, FILL_OR_KILL (Limit/StopLimit only)",
+        "Order duration: DAY (default), GOOD_TILL_CANCEL (alias: GTC), IMMEDIATE_OR_CANCEL (alias: IOC), FILL_OR_KILL (alias: FOK; Limit/StopLimit only). Invalid values raise ValueError locally.",
     ] = "DAY",
 ) -> dict[str, Any]:
     """
@@ -581,7 +706,7 @@ async def build_equity_trailing_stop_order_spec(
     ] = "NORMAL",
     duration: Annotated[
         str | None,
-        "Order duration: DAY (default) or GOOD_TILL_CANCEL",
+        "Order duration: DAY (default), GOOD_TILL_CANCEL (alias: GTC), or IMMEDIATE_OR_CANCEL (alias: IOC). Invalid values raise ValueError locally.",
     ] = "DAY",
 ) -> dict[str, Any]:
     """
@@ -616,7 +741,7 @@ async def build_option_order_spec(
     ] = "NORMAL",
     duration: Annotated[
         str | None,
-        "Order duration: DAY (default), GOOD_TILL_CANCEL, FILL_OR_KILL (Limit only)",
+        "Order duration: DAY (default), GOOD_TILL_CANCEL (alias: GTC), IMMEDIATE_OR_CANCEL (alias: IOC), FILL_OR_KILL (alias: FOK; Limit only). Invalid values raise ValueError locally.",
     ] = "DAY",
 ) -> dict[str, Any]:
     """
@@ -828,8 +953,12 @@ async def place_bracket_order(
     quantity: Annotated[int, "Number of shares to trade"],
     entry_instruction: Annotated[str, "BUY or SELL for the entry order"],
     entry_type: Annotated[str, "Entry order type: MARKET, LIMIT, STOP, or STOP_LIMIT"],
-    profit_price: Annotated[float, "Take-profit limit price"],
-    loss_price: Annotated[float, "Stop-loss trigger price"],
+    profit_price: Annotated[
+        float | None, "Take-profit limit price (optional if loss_price provided)"
+    ] = None,
+    loss_price: Annotated[
+        float | None, "Stop-loss trigger price (optional if profit_price provided)"
+    ] = None,
     entry_price: Annotated[
         float | None, "Required for LIMIT entry; Limit price for STOP_LIMIT entry"
     ] = None,
@@ -840,17 +969,30 @@ async def place_bracket_order(
         str | None, "Trading session: NORMAL (default), AM, PM, or SEAMLESS"
     ] = "NORMAL",
     duration: Annotated[
-        str | None, "Order duration: DAY (default), GOOD_TILL_CANCEL"
+        str | None,
+        "Order duration: DAY (default), GOOD_TILL_CANCEL (alias: GTC), or IMMEDIATE_OR_CANCEL (alias: IOC). Invalid values raise ValueError locally.",
     ] = "DAY",
 ) -> JSONType:
     """
-    Creates a bracket order: entry + OCO take-profit/stop-loss. Exits trigger after entry executes.
+    Creates a bracket order: entry + exit leg(s) that trigger after entry executes.
+
+    Exit behavior depends on which prices are provided:
+    - Both profit_price and loss_price: TRIGGER > OCO(limit, stop) — full bracket with take-profit and stop-loss.
+    - Only loss_price: TRIGGER > SINGLE(stop) — stop-loss only, no take-profit leg.
+    - Only profit_price: TRIGGER > SINGLE(limit) — take-profit only, no stop-loss leg.
+    - Neither: raises ValueError before any order is submitted.
+
     Params: account_hash, symbol, quantity, entry_instruction (BUY/SELL), entry_type (MARKET/LIMIT/STOP/STOP_LIMIT), profit_price, loss_price.
+    At least one of profit_price or loss_price must be provided.
     Optional/Conditional: entry_price (for LIMIT/STOP_LIMIT), entry_stop_price (for STOP/STOP_LIMIT), session (default NORMAL), duration (default DAY).
     Ensure profit/loss prices are correctly positioned relative to entry (e.g., profit > entry for BUY).
     Note: Duration applies to all legs of the order. FILL_OR_KILL is not typically used with bracket orders.
     *Write operation.*
     """
+    # Validate that at least one exit price is provided
+    if profit_price is None and loss_price is None:
+        raise ValueError("At least one of profit_price or loss_price must be provided")
+
     # Validate entry instruction
     client = ctx.orders
 
@@ -875,29 +1017,41 @@ async def place_bracket_order(
     # Apply settings to entry order builder
     entry_order_builder = _apply_order_settings(entry_order_builder, session, duration)
 
-    # Create take-profit (limit) order spec builder
-    if exit_instruction == "BUY":
-        profit_order_builder = equity_buy_limit(symbol, quantity, profit_price)
-    else:  # SELL
-        profit_order_builder = equity_sell_limit(symbol, quantity, profit_price)
-    # Apply settings to profit order builder
-    profit_order_builder = _apply_order_settings(
-        profit_order_builder, session, duration
-    )
+    # Build exit leg(s) based on which prices are provided
+    if profit_price is not None:
+        # Create take-profit (limit) order spec builder
+        if exit_instruction == "BUY":
+            profit_order_builder = equity_buy_limit(symbol, quantity, profit_price)
+        else:  # SELL
+            profit_order_builder = equity_sell_limit(symbol, quantity, profit_price)
+        profit_order_builder = _apply_order_settings(
+            profit_order_builder, session, duration
+        )
 
-    # Create stop-loss (stop) order spec builder
-    if exit_instruction == "BUY":
-        loss_order_builder = equity_buy_stop(symbol, quantity, loss_price)
-    else:  # SELL
-        loss_order_builder = equity_sell_stop(symbol, quantity, loss_price)
-    # Apply settings to loss order builder
-    loss_order_builder = _apply_order_settings(loss_order_builder, session, duration)
+    if loss_price is not None:
+        # Create stop-loss (stop) order spec builder
+        if exit_instruction == "BUY":
+            loss_order_builder = equity_buy_stop(symbol, quantity, loss_price)
+        else:  # SELL
+            loss_order_builder = equity_sell_stop(symbol, quantity, loss_price)
+        loss_order_builder = _apply_order_settings(
+            loss_order_builder, session, duration
+        )
 
-    # Create OCO order builder for take-profit and stop-loss using the builder helper
-    oco_exit_order_builder = oco_builder(profit_order_builder, loss_order_builder)
-
-    # Create the trigger order builder (entry triggers OCO) using the builder helper
-    bracket_order_builder = trigger_builder(entry_order_builder, oco_exit_order_builder)
+    if profit_price is not None and loss_price is not None:
+        # Both prices: entry triggers OCO(profit, loss)
+        oco_exit_order_builder = oco_builder(profit_order_builder, loss_order_builder)
+        bracket_order_builder = trigger_builder(
+            entry_order_builder, oco_exit_order_builder
+        )
+    elif loss_price is not None:
+        # Stop-loss only: entry triggers single stop order
+        bracket_order_builder = trigger_builder(entry_order_builder, loss_order_builder)
+    else:
+        # Take-profit only: entry triggers single limit order
+        bracket_order_builder = trigger_builder(
+            entry_order_builder, profit_order_builder
+        )
 
     # Build the final complex bracket order dictionary
     bracket_order_dict = cast(dict[str, Any], bracket_order_builder.build())
@@ -929,7 +1083,8 @@ async def place_option_combo_order(
         str | None, "Trading session: NORMAL (default), AM, PM, or SEAMLESS"
     ] = "NORMAL",
     duration: Annotated[
-        str | None, "Order duration: DAY (default) or GOOD_TILL_CANCEL"
+        str | None,
+        "Order duration: DAY (default), GOOD_TILL_CANCEL (alias: GTC), or IMMEDIATE_OR_CANCEL (alias: IOC). Invalid values raise ValueError locally.",
     ] = "DAY",
     complex_order_strategy_type: Annotated[
         str | None,
