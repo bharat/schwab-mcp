@@ -2013,7 +2013,9 @@ class TestAssetTypeGuard:
         assert err.symbol == "LENDX"
         assert err.resolved_type == "MUTUAL_FUND"
         assert err.supported == orders._EQUITY_ORDERABLE_ASSET_TYPES
-        assert "Schwab.com" in str(err)
+        # Assert on the hint's non-hostname portion; a "Schwab.com" substring
+        # check trips CodeQL's URL-sanitization rule.
+        assert "Trade > Mutual Funds" in str(err)
 
     def test_preview_rejects_fixed_income_symbol(self, account_hash):
         client = DummyGuardedPreviewClient("FIXED_INCOME")
