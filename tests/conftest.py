@@ -16,12 +16,24 @@ class DummyApprovalManager(ApprovalManager):
         return ApprovalDecision.APPROVED
 
 
+class _DummySession:
+    """Minimal MCP session stub for tests that invoke ctx.warning/log."""
+
+    async def send_log_message(self, **kwargs: Any) -> None:  # noqa: ARG002
+        pass
+
+
 def make_ctx(client: Any) -> SchwabContext:
     lifespan_context = SchwabServerContext(
         client=cast(AsyncClient, client),
         approval_manager=DummyApprovalManager(),
     )
-    request_context = SimpleNamespace(lifespan_context=lifespan_context)
+    request_context = SimpleNamespace(
+        lifespan_context=lifespan_context,
+        request_id="test-request-id",
+        meta=None,
+        session=_DummySession(),
+    )
     return SchwabContext.model_construct(
         _request_context=cast(Any, request_context),
         _fastmcp=None,
@@ -86,9 +98,7 @@ class DummyOrderResponse:
         self.url = f"https://api.schwabapi.com/trader/v1/accounts/{account_hash}/orders"
         self.text = ""
         self.content = b""
-        self.headers = {
-            "Location": f"https://api.schwabapi.com/trader/v1/accounts/{account_hash}/orders/{order_id}"
-        }
+        self.headers = {"Location": f"https://api.schwabapi.com/trader/v1/accounts/{account_hash}/orders/{order_id}"}
         self.is_error = False
 
     def raise_for_status(self) -> None:
@@ -151,9 +161,7 @@ class DummyPlaceOrderClient:
     async def get_instruments(self, symbol: str, projection: Any) -> Any:  # noqa: ARG002
         if self.asset_type_override == "raise":
             raise RuntimeError("simulated get_instruments failure")
-        return DummyInstrumentsResponse(
-            symbol=symbol, asset_type=self.asset_type_override
-        )
+        return DummyInstrumentsResponse(symbol=symbol, asset_type=self.asset_type_override)
 
 
 @pytest.fixture

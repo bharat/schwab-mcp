@@ -1,11 +1,12 @@
+"""Base classes and data types for the approval workflow."""
+
 from __future__ import annotations
 
 import abc
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Mapping
-
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +49,10 @@ def format_arguments(arguments: Mapping[str, str]) -> str:
 class ApprovalManager(abc.ABC):
     """Interface for asynchronous approval backends."""
 
-    async def start(self) -> None:
+    async def start(self) -> None:  # noqa: B027
         """Perform any startup/connection work."""
 
-    async def stop(self) -> None:
+    async def stop(self) -> None:  # noqa: B027
         """Clean up resources."""
 
     @abc.abstractmethod
@@ -68,9 +69,9 @@ class NoOpApprovalManager(ApprovalManager):
     """
 
     async def require(self, request: ApprovalRequest) -> ApprovalDecision:
+        """Approve the request with no external check, logging an audit line."""
         logger.warning(
-            "Auto-approving write tool '%s' (request=%s, approval=%s) with no "
-            "human review: %s",
+            "Auto-approving write tool '%s' (request=%s, approval=%s) with no human review: %s",
             request.tool_name,
             request.request_id,
             request.id,

@@ -1,9 +1,10 @@
+"""Shared utilities: API call helper, error types, JSON type aliases, and data parsers."""
+
 from __future__ import annotations
 
 import datetime
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeAlias
-
 
 JSONPrimitive = str | int | float | bool | None
 JSONType: TypeAlias = JSONPrimitive | dict[str, Any] | list[Any]
@@ -24,9 +25,7 @@ class SchwabAPIError(Exception):
         correlation_id: str | None = None,
     ) -> None:
         suffix = f"; correlid={correlation_id}" if correlation_id else ""
-        super().__init__(
-            f"Schwab API request failed; status={status_code}; url={url}; body={body}{suffix}"
-        )
+        super().__init__(f"Schwab API request failed; status={status_code}; url={url}; body={body}{suffix}")
         self.status_code = status_code
         self.url = url
         self.body = body
@@ -107,7 +106,6 @@ async def call(
     by returning ``(True, payload)``. Returning ``(False, _)`` delegates back to
     the default JSON parsing behavior.
     """
-
     response = await func(*args, **kwargs)
     try:
         response.raise_for_status()
@@ -115,15 +113,9 @@ async def call(
         body = response.text
         if not body:
             raw = getattr(response, "content", b"")
-            body = (
-                raw.decode("utf-8", errors="replace")
-                if raw
-                else f"HTTP {response.status_code}"
-            )
+            body = raw.decode("utf-8", errors="replace") if raw else f"HTTP {response.status_code}"
         headers = getattr(response, "headers", None)
-        correlation_id = (
-            headers.get("Schwab-Client-CorrelId") if headers is not None else None
-        )
+        correlation_id = headers.get("Schwab-Client-CorrelId") if headers is not None else None
         raise SchwabAPIError(
             status_code=response.status_code,
             url=response.url,

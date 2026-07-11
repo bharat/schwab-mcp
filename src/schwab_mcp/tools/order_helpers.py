@@ -1,12 +1,12 @@
-#
+"""Factory functions that build pre-configured Schwab OrderBuilder instances."""
 
 from schwab.orders.common import (
-    OrderType,
-    Session,
     Duration,
-    OrderStrategyType,
     EquityInstruction,
     OptionInstruction,
+    OrderStrategyType,
+    OrderType,
+    Session,
 )
 from schwab.orders.generic import OrderBuilder
 
@@ -25,9 +25,7 @@ def _price_str(price: float) -> str:
 
 
 def __equity_base_builder(session=Session.NORMAL, duration=Duration.DAY):
-    """
-    Returns a base OrderBuilder for equity orders with common settings.
-    """
+    """Returns a base OrderBuilder for equity orders with common settings."""
     return (
         OrderBuilder(enforce_enums=False)
         .set_session(session)
@@ -37,9 +35,7 @@ def __equity_base_builder(session=Session.NORMAL, duration=Duration.DAY):
 
 
 def equity_buy_market(symbol, quantity, duration=Duration.DAY, session=Session.NORMAL):
-    """
-    Returns a pre-filled OrderBuilder for an equity buy market order.
-    """
+    """Returns a pre-filled OrderBuilder for an equity buy market order."""
     return (
         __equity_base_builder(session, duration)
         .set_order_type(OrderType.MARKET)
@@ -48,9 +44,7 @@ def equity_buy_market(symbol, quantity, duration=Duration.DAY, session=Session.N
 
 
 def equity_sell_market(symbol, quantity, duration=Duration.DAY, session=Session.NORMAL):
-    """
-    Returns a pre-filled OrderBuilder for an equity sell market order.
-    """
+    """Returns a pre-filled OrderBuilder for an equity sell market order."""
     return (
         __equity_base_builder(session, duration)
         .set_order_type(OrderType.MARKET)
@@ -58,12 +52,8 @@ def equity_sell_market(symbol, quantity, duration=Duration.DAY, session=Session.
     )
 
 
-def equity_buy_limit(
-    symbol, quantity, price, duration=Duration.DAY, session=Session.NORMAL
-):
-    """
-    Returns a pre-filled OrderBuilder for an equity buy limit order.
-    """
+def equity_buy_limit(symbol, quantity, price, duration=Duration.DAY, session=Session.NORMAL):
+    """Returns a pre-filled OrderBuilder for an equity buy limit order."""
     return (
         __equity_base_builder(session, duration)
         .set_order_type(OrderType.LIMIT)
@@ -72,12 +62,8 @@ def equity_buy_limit(
     )
 
 
-def equity_sell_limit(
-    symbol, quantity, price, duration=Duration.DAY, session=Session.NORMAL
-):
-    """
-    Returns a pre-filled OrderBuilder for an equity sell limit order.
-    """
+def equity_sell_limit(symbol, quantity, price, duration=Duration.DAY, session=Session.NORMAL):
+    """Returns a pre-filled OrderBuilder for an equity sell limit order."""
     return (
         __equity_base_builder(session, duration)
         .set_order_type(OrderType.LIMIT)
@@ -86,12 +72,8 @@ def equity_sell_limit(
     )
 
 
-def equity_buy_stop(
-    symbol, quantity, stop_price, duration=Duration.DAY, session=Session.NORMAL
-):
-    """
-    Returns a pre-filled OrderBuilder for an equity buy stop order.
-    """
+def equity_buy_stop(symbol, quantity, stop_price, duration=Duration.DAY, session=Session.NORMAL):
+    """Returns a pre-filled OrderBuilder for an equity buy stop order."""
     return (
         __equity_base_builder(session, duration)
         .set_order_type(OrderType.STOP)
@@ -100,12 +82,8 @@ def equity_buy_stop(
     )
 
 
-def equity_sell_stop(
-    symbol, quantity, stop_price, duration=Duration.DAY, session=Session.NORMAL
-):
-    """
-    Returns a pre-filled OrderBuilder for an equity sell stop order.
-    """
+def equity_sell_stop(symbol, quantity, stop_price, duration=Duration.DAY, session=Session.NORMAL):
+    """Returns a pre-filled OrderBuilder for an equity sell stop order."""
     return (
         __equity_base_builder(session, duration)
         .set_order_type(OrderType.STOP)
@@ -122,9 +100,7 @@ def equity_buy_stop_limit(
     duration=Duration.DAY,
     session=Session.NORMAL,
 ):
-    """
-    Returns a pre-filled OrderBuilder for an equity buy stop-limit order.
-    """
+    """Returns a pre-filled OrderBuilder for an equity buy stop-limit order."""
     return (
         __equity_base_builder(session, duration)
         .set_order_type(OrderType.STOP_LIMIT)
@@ -142,9 +118,7 @@ def equity_sell_stop_limit(
     duration=Duration.DAY,
     session=Session.NORMAL,
 ):
-    """
-    Returns a pre-filled OrderBuilder for an equity sell stop-limit order.
-    """
+    """Returns a pre-filled OrderBuilder for an equity sell stop-limit order."""
     return (
         __equity_base_builder(session, duration)
         .set_order_type(OrderType.STOP_LIMIT)
@@ -155,9 +129,7 @@ def equity_sell_stop_limit(
 
 
 def __option_base_builder(session=Session.NORMAL, duration=Duration.DAY):
-    """
-    Returns a base OrderBuilder for option orders with common settings.
-    """
+    """Returns a base OrderBuilder for option orders with common settings."""
     return (
         OrderBuilder(enforce_enums=False)
         .set_session(session)
@@ -166,12 +138,8 @@ def __option_base_builder(session=Session.NORMAL, duration=Duration.DAY):
     )
 
 
-def option_buy_to_open_market(
-    symbol, quantity, duration=Duration.DAY, session=Session.NORMAL
-):
-    """
-    Returns a pre-filled OrderBuilder for a buy-to-open market order.
-    """
+def option_buy_to_open_market(symbol, quantity, duration=Duration.DAY, session=Session.NORMAL):
+    """Returns a pre-filled OrderBuilder for a buy-to-open market order."""
     return (
         __option_base_builder(session, duration)
         .set_order_type(OrderType.MARKET)
@@ -179,12 +147,8 @@ def option_buy_to_open_market(
     )
 
 
-def option_sell_to_open_market(
-    symbol, quantity, duration=Duration.DAY, session=Session.NORMAL
-):
-    """
-    Returns a pre-filled OrderBuilder for a sell-to-open market order.
-    """
+def option_sell_to_open_market(symbol, quantity, duration=Duration.DAY, session=Session.NORMAL):
+    """Returns a pre-filled OrderBuilder for a sell-to-open market order."""
     return (
         __option_base_builder(session, duration)
         .set_order_type(OrderType.MARKET)
@@ -192,12 +156,8 @@ def option_sell_to_open_market(
     )
 
 
-def option_buy_to_close_market(
-    symbol, quantity, duration=Duration.DAY, session=Session.NORMAL
-):
-    """
-    Returns a pre-filled OrderBuilder for a buy-to-close market order.
-    """
+def option_buy_to_close_market(symbol, quantity, duration=Duration.DAY, session=Session.NORMAL):
+    """Returns a pre-filled OrderBuilder for a buy-to-close market order."""
     return (
         __option_base_builder(session, duration)
         .set_order_type(OrderType.MARKET)
@@ -205,12 +165,8 @@ def option_buy_to_close_market(
     )
 
 
-def option_sell_to_close_market(
-    symbol, quantity, duration=Duration.DAY, session=Session.NORMAL
-):
-    """
-    Returns a pre-filled OrderBuilder for a sell-to-close market order.
-    """
+def option_sell_to_close_market(symbol, quantity, duration=Duration.DAY, session=Session.NORMAL):
+    """Returns a pre-filled OrderBuilder for a sell-to-close market order."""
     return (
         __option_base_builder(session, duration)
         .set_order_type(OrderType.MARKET)
@@ -218,12 +174,8 @@ def option_sell_to_close_market(
     )
 
 
-def option_buy_to_open_limit(
-    symbol, quantity, price, duration=Duration.DAY, session=Session.NORMAL
-):
-    """
-    Returns a pre-filled OrderBuilder for a buy-to-open limit order.
-    """
+def option_buy_to_open_limit(symbol, quantity, price, duration=Duration.DAY, session=Session.NORMAL):
+    """Returns a pre-filled OrderBuilder for a buy-to-open limit order."""
     return (
         __option_base_builder(session, duration)
         .set_order_type(OrderType.LIMIT)
@@ -232,12 +184,8 @@ def option_buy_to_open_limit(
     )
 
 
-def option_sell_to_open_limit(
-    symbol, quantity, price, duration=Duration.DAY, session=Session.NORMAL
-):
-    """
-    Returns a pre-filled OrderBuilder for a sell-to-open limit order.
-    """
+def option_sell_to_open_limit(symbol, quantity, price, duration=Duration.DAY, session=Session.NORMAL):
+    """Returns a pre-filled OrderBuilder for a sell-to-open limit order."""
     return (
         __option_base_builder(session, duration)
         .set_order_type(OrderType.LIMIT)
@@ -246,12 +194,8 @@ def option_sell_to_open_limit(
     )
 
 
-def option_buy_to_close_limit(
-    symbol, quantity, price, duration=Duration.DAY, session=Session.NORMAL
-):
-    """
-    Returns a pre-filled OrderBuilder for a buy-to-close limit order.
-    """
+def option_buy_to_close_limit(symbol, quantity, price, duration=Duration.DAY, session=Session.NORMAL):
+    """Returns a pre-filled OrderBuilder for a buy-to-close limit order."""
     return (
         __option_base_builder(session, duration)
         .set_order_type(OrderType.LIMIT)
@@ -260,12 +204,8 @@ def option_buy_to_close_limit(
     )
 
 
-def option_sell_to_close_limit(
-    symbol, quantity, price, duration=Duration.DAY, session=Session.NORMAL
-):
-    """
-    Returns a pre-filled OrderBuilder for a sell-to-close limit order.
-    """
+def option_sell_to_close_limit(symbol, quantity, price, duration=Duration.DAY, session=Session.NORMAL):
+    """Returns a pre-filled OrderBuilder for a sell-to-close limit order."""
     return (
         __option_base_builder(session, duration)
         .set_order_type(OrderType.LIMIT)
@@ -283,9 +223,7 @@ def equity_trailing_stop(
     duration=Duration.DAY,
     session=Session.NORMAL,
 ):
-    """
-    Returns a pre-filled OrderBuilder for an equity trailing stop order.
-    """
+    """Returns a pre-filled OrderBuilder for an equity trailing stop order."""
     return (
         __equity_base_builder(session, duration)
         .set_order_type(OrderType.TRAILING_STOP)

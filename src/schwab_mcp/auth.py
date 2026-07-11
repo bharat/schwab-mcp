@@ -1,6 +1,4 @@
-#
-# Wrappers around schwab.auth to inject our own token manager
-#
+"""Wrappers around schwab.auth to inject the schwab-mcp token manager."""
 
 import logging
 import urllib.parse
@@ -11,7 +9,6 @@ from schwab import auth
 from schwab.client import AsyncClient, Client
 
 from schwab_mcp import tokens
-
 
 DEFAULT_MAX_TOKEN_AGE_SECONDS = 5 * 24 * 60 * 60
 
@@ -38,6 +35,7 @@ def easy_client(
     requested_browser: str | None = None,
     base_url: str = auth.DEFAULT_BASE_URL,
 ) -> AsyncClient | Client:
+    """Return an authenticated Schwab client, reusing a cached token when valid."""
     effective_max_token_age = 0 if max_token_age is None else max_token_age
 
     if effective_max_token_age < 0:
@@ -59,10 +57,7 @@ def easy_client(
         )
         logger.info("Loaded token from %s", token_manager.path)
 
-        if (
-            effective_max_token_age > 0
-            and client.token_age() >= effective_max_token_age
-        ):
+        if effective_max_token_age > 0 and client.token_age() >= effective_max_token_age:
             logger.info("token too old, proactively creating a new one")
             client = None
 
@@ -83,9 +78,7 @@ def easy_client(
         base_url=base_url,
     )
 
-    logger.info(
-        f"Returning client fetched using web browser, writing token to '{token_manager.path}'"
-    )
+    logger.info(f"Returning client fetched using web browser, writing token to '{token_manager.path}'")
 
     return client
 
@@ -102,6 +95,7 @@ def client_from_login_flow(
     requested_browser: str | None = None,
     base_url: str = auth.DEFAULT_BASE_URL,
 ) -> AsyncClient | Client:
+    """Run the browser OAuth flow and return a fresh Schwab client."""
     if callback_timeout is None:
         callback_timeout = 0
 
@@ -140,10 +134,9 @@ def client_from_login_flow(
         try:
             yield
         finally:
-            try:
-                auth.psutil.Process(server.pid).kill()
-            except auth.psutil.NoSuchProcess:
-                pass
+            if server.pid is not None:
+                with auth.contextlib.suppress(auth.psutil.NoSuchProcess):
+                    auth.psutil.Process(server.pid).kill()
 
     with callback_server():
         # Wait until the server successfully starts
@@ -193,9 +186,7 @@ def client_from_login_flow(
         params = urllib.parse.parse_qs(parsed_url.query)
 
         print("URL Verification:")
-        print(
-            f"  ✓ Base URL: {parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
-        )
+        print(f"  ✓ Base URL: {parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}")
         print(f"  ✓ client_id: {params.get('client_id', ['MISSING'])[0][:20]}...")
         print(f"  ✓ redirect_uri: {params.get('redirect_uri', ['MISSING'])[0]}")
 
@@ -211,12 +202,15 @@ def client_from_login_flow(
             print("  ✓ No extra parameters (correct format)")
 
         print()
-        print("Your callback URL: {}".format(callback_url))
+        print(f"Your callback URL: {callback_url}")
         print()
         print("=" * 80)
         print()
 
         if interactive:
+            # The authorization URL and callback URL were already printed
+            # above (unconditionally, with verification), so the upstream
+            # interactive banner that repeats them is intentionally omitted.
             print("IMPORTANT: Your browser will give you a security warning about an")
             print("invalid certificate prior to issuing the redirect. This is because")
             print("schwab-py has started a server on your machine to receive the OAuth")
@@ -228,18 +222,14 @@ def client_from_login_flow(
             print("https://schwab-py.readthedocs.io/en/latest/auth.html#ssl-errors")
             print()
             print("If you encounter any issues, see here for troubleshooting:")
-            print(
-                "https://schwab-py.readthedocs.io/en/latest/auth.html#troubleshooting"
-            )
+            print("https://schwab-py.readthedocs.io/en/latest/auth.html#troubleshooting")
             print()
             print("=" * 80)
             print()
 
-        try:
+        with auth.contextlib.suppress(Exception):
             controller = auth.webbrowser.get(requested_browser)
             controller.open(auth_context.authorization_url)
-        except Exception:
-            pass
 
         # Wait for a response
         now = auth.__TIME_TIME()
@@ -252,7 +242,7 @@ def client_from_login_flow(
                     # XXX: We're detecting a test environment here to avoid an
                     #      infinite sleep. Surely there must be a better way to do
                     #      this...
-                    if auth.__TIME_TIME != auth.time.time:  # pragma: no cover
+                    if auth.time.time != auth.__TIME_TIME:  # pragma: no cover
                         raise ValueError("endless wait requested")
                 else:
                     break

@@ -17,6 +17,7 @@ dependencies = [
     "python-toon>=0.1.2",
     "pyyaml>=6.0.3",
     "schwab-py",
+    "typing-extensions>=4.12.0",
     "websockets>=14.0",
 ]
 
@@ -33,7 +34,9 @@ dev = [
     "pyright>=1.1.407",
     "pytest>=8.4.2",
     "pytest-cov>=6.0.0",
+    "pytest-randomly>=3.16",
     "ruff>=0.14.0",
+    "vulture>=2.14",
 ]
 ta = [
     "pandas>=2.2.2",
@@ -48,7 +51,7 @@ addopts = "--cov=schwab_mcp --cov-report=term-missing"
 [tool.coverage.run]
 source = ["src/schwab_mcp"]
 branch = true
-omit = ["*/tests/*"]
+omit = ["*/tests/*", "*/tools/_protocols.py"]
 
 [tool.coverage.report]
 exclude_lines = [
@@ -58,6 +61,39 @@ exclude_lines = [
     "@abstractmethod",
 ]
 show_missing = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "A",      # flake8-builtins
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "D",      # pydocstyle
+    "E",      # pycodestyle (Error)
+    "F",      # Pyflakes
+    "I",      # isort
+    "PERF",   # Perflint
+    "PIE",    # flake8-pie
+    "S",      # flake8-bandit
+    "SIM",    # flake8-simplify
+    "T10",    # flake8-debugger
+    "T20",    # flake8-print
+    "UP",     # pyupgrade
+    "YTT",    # flake8-2020
+]
+ignore = ["D105", "D107", "D205", "D415", "E501", "B011", "B028", "B904", "PIE804"]
+isort = { known-first-party = ["schwab_mcp", "tests"], combine-as-imports = true }
+pydocstyle = { convention = "google" }
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["A002", "D", "B", "C4", "T", "E721", "F811", "S101", "S105", "S106", "S108"]
+"src/schwab_mcp/auth.py" = ["T201"]
+
+[tool.ruff.format]
+quote-style = "double"
 
 [tool.pyright]
 include = ["src", "tests"]
@@ -74,6 +110,11 @@ venvPath = "."
 venv = ".venv"
 reportMissingImports = false
 typeCheckingMode = "basic"
+
+[tool.vulture]
+paths = ["src"]
+min_confidence = 80
+exclude = ["src/schwab_mcp/tools/_protocols.py"]
 
 [tool.uv]
 # Supply-chain hygiene: refuse to resolve any package version less than 14 days

@@ -45,9 +45,7 @@ STATUS_CANCELED = "CANCELED"
 STATUS_FAILED = "FAILED"
 STATUS_EXHAUSTED = "EXHAUSTED"
 
-_OPTION_INSTRUCTIONS = frozenset(
-    {"BUY_TO_OPEN", "SELL_TO_OPEN", "BUY_TO_CLOSE", "SELL_TO_CLOSE"}
-)
+_OPTION_INSTRUCTIONS = frozenset({"BUY_TO_OPEN", "SELL_TO_OPEN", "BUY_TO_CLOSE", "SELL_TO_CLOSE"})
 
 _DEFAULT_STEP = 0.05
 _DEFAULT_INTERVAL_SEC = 300.0
@@ -174,41 +172,29 @@ def _validate_inputs(
 ) -> tuple[str, list[int], str]:
     instruction = instruction.upper()
     if instruction not in _OPTION_INSTRUCTIONS:
-        raise ValueError(
-            f"instruction must be one of {sorted(_OPTION_INSTRUCTIONS)}; got {instruction!r}"
-        )
+        raise ValueError(f"instruction must be one of {sorted(_OPTION_INSTRUCTIONS)}; got {instruction!r}")
 
     is_sell = instruction.startswith("SELL")
     if is_sell and not (range_start > range_end):
-        raise ValueError(
-            f"For SELL: range_start ({range_start}) must be > range_end ({range_end})"
-        )
+        raise ValueError(f"For SELL: range_start ({range_start}) must be > range_end ({range_end})")
     if (not is_sell) and not (range_start < range_end):
-        raise ValueError(
-            f"For BUY: range_start ({range_start}) must be < range_end ({range_end})"
-        )
+        raise ValueError(f"For BUY: range_start ({range_start}) must be < range_end ({range_end})")
 
     if quantity <= 0:
         raise ValueError("quantity must be > 0")
     if step <= 0:
         raise ValueError("step must be > 0")
     if abs(range_start - range_end) < step:
-        raise ValueError(
-            f"range span ({abs(range_start - range_end):.4f}) is smaller than step ({step})"
-        )
+        raise ValueError(f"range span ({abs(range_start - range_end):.4f}) is smaller than step ({step})")
 
     pattern_normalized = pattern.lower()
     if pattern_normalized not in _PATTERNS:
         raise ValueError(f"pattern must be one of {sorted(_PATTERNS)}; got {pattern!r}")
 
     if step_interval_seconds < _MIN_INTERVAL_SEC:
-        raise ValueError(
-            f"step_interval_seconds must be >= {_MIN_INTERVAL_SEC}; got {step_interval_seconds}"
-        )
+        raise ValueError(f"step_interval_seconds must be >= {_MIN_INTERVAL_SEC}; got {step_interval_seconds}")
     if not (0.0 <= timing_jitter_pct <= 1.0):
-        raise ValueError(
-            f"timing_jitter_pct must be in [0, 1]; got {timing_jitter_pct}"
-        )
+        raise ValueError(f"timing_jitter_pct must be in [0, 1]; got {timing_jitter_pct}")
 
     if chunks is None:
         chunks_resolved = _auto_chunks(quantity)
@@ -240,9 +226,7 @@ def _initial_prices(campaign: _Campaign) -> list[float]:
         # Linear ladder over ~40% of the range, so all chunks start in the
         # "favorable half" of the range.
         span = campaign.range_start - campaign.range_end
-        prices = [
-            campaign.range_start - (span * i / max(n - 1, 1)) * 0.4 for i in range(n)
-        ]
+        prices = [campaign.range_start - (span * i / max(n - 1, 1)) * 0.4 for i in range(n)]
         # Clamp to range
         if campaign.is_sell():
             prices = [max(p, campaign.range_end) for p in prices]
@@ -292,14 +276,11 @@ def _next_price(campaign: _Campaign, sub: _SubOrder) -> float | None:
         elif r < 0.95:
             nxt = cur
         else:
-            # head-fake — step BACK toward range_start by a fraction of step
+            # head-fake: step BACK toward range_start by a fraction of step
             nxt = cur + step * 0.5 if is_sell else cur - step * 0.5
 
     # Clamp to range
-    if is_sell:
-        nxt = max(nxt, end)
-    else:
-        nxt = min(nxt, end)
+    nxt = max(nxt, end) if is_sell else min(nxt, end)
 
     return round(nxt, 2)
 
@@ -331,9 +312,7 @@ def _jittered_interval(campaign: _Campaign) -> float:
 # ===== Direct schwab client ops (no approval wrapper) =====
 
 
-def _make_response_handler(
-    client: Any, account_hash: str
-) -> Callable[[Any], tuple[bool, Any]]:
+def _make_response_handler(client: Any, account_hash: str) -> Callable[[Any], tuple[bool, Any]]:
     """Build a response handler that extracts the order_id from a Schwab response."""
     from schwab.utils import (
         AccountHashMismatchException,
@@ -374,9 +353,7 @@ async def _direct_place_option(
     duration: str,
     response_handler: Callable[[Any], tuple[bool, Any]],
 ) -> str | None:
-    spec_builder = _build_option_order_spec(
-        symbol, quantity, instruction, "LIMIT", price=price
-    )
+    spec_builder = _build_option_order_spec(symbol, quantity, instruction, "LIMIT", price=price)
     spec_builder = _apply_order_settings(spec_builder, session, duration)
     spec = cast(dict[str, Any], spec_builder.build())
     result = await call(
@@ -398,13 +375,9 @@ async def _direct_cancel(client: Any, account_hash: str, order_id: str) -> None:
         logger.exception("Fishing: failed to cancel order %s", order_id)
 
 
-async def _direct_get_status(
-    client: Any, account_hash: str, order_id: str
-) -> dict[str, Any] | None:
+async def _direct_get_status(client: Any, account_hash: str, order_id: str) -> dict[str, Any] | None:
     try:
-        result = await call(
-            client.get_order, order_id=order_id, account_hash=account_hash
-        )
+        result = await call(client.get_order, order_id=order_id, account_hash=account_hash)
         if isinstance(result, dict):
             return result
     except Exception:  # pragma: no cover - best-effort poll
@@ -422,7 +395,7 @@ def _now_iso() -> str:
 async def _place_initial_chunks(client: Any, campaign: _Campaign) -> None:
     rh = _make_response_handler(client, campaign.account_hash)
     initial_prices = _initial_prices(campaign)
-    for chunk_idx, (qty, price) in enumerate(zip(campaign.chunks, initial_prices)):
+    for chunk_idx, (qty, price) in enumerate(zip(campaign.chunks, initial_prices, strict=True)):
         sub = _SubOrder(chunk_idx=chunk_idx, quantity=qty, price=price)
         campaign.sub_orders.append(sub)
         try:
@@ -449,21 +422,15 @@ async def _place_initial_chunks(client: Any, campaign: _Campaign) -> None:
             )
         except Exception as e:
             sub.schwab_status = "FAILED"
-            sub.history.append(
-                {"at": _now_iso(), "event": "place_failed", "error": str(e)}
-            )
-            logger.exception(
-                "Fishing %s chunk %d initial place failed", campaign.id, chunk_idx
-            )
+            sub.history.append({"at": _now_iso(), "event": "place_failed", "error": str(e)})
+            logger.exception("Fishing %s chunk %d initial place failed", campaign.id, chunk_idx)
 
 
 async def _poll_sub_statuses(client: Any, campaign: _Campaign) -> None:
     for sub in campaign.sub_orders:
         if sub.is_terminal() or sub.order_id is None:
             continue
-        status_result = await _direct_get_status(
-            client, campaign.account_hash, sub.order_id
-        )
+        status_result = await _direct_get_status(client, campaign.account_hash, sub.order_id)
         if status_result is None:
             continue
         new_status = str(status_result.get("status", sub.schwab_status))
@@ -560,12 +527,8 @@ async def _adjust_subs(client: Any, campaign: _Campaign) -> int:
             count += 1
         except Exception as e:
             sub.schwab_status = "FAILED"
-            sub.history.append(
-                {"at": _now_iso(), "event": "replace_failed", "error": str(e)}
-            )
-            logger.exception(
-                "Fishing %s chunk %d replace failed", campaign.id, sub.chunk_idx
-            )
+            sub.history.append({"at": _now_iso(), "event": "replace_failed", "error": str(e)})
+            logger.exception("Fishing %s chunk %d replace failed", campaign.id, sub.chunk_idx)
     return count
 
 
@@ -608,9 +571,7 @@ async def _run_campaign(client: Any, campaign: _Campaign) -> None:
             adjusted = await _adjust_subs(client, campaign)
             if campaign.status != STATUS_RUNNING:
                 break
-            campaign.last_event = (
-                f"poll cycle complete; adjusted {adjusted} chunk(s) @ {_now_iso()}"
-            )
+            campaign.last_event = f"poll cycle complete; adjusted {adjusted} chunk(s) @ {_now_iso()}"
 
         await _cleanup_open_orders(client, campaign)
     except Exception:
@@ -620,13 +581,9 @@ async def _run_campaign(client: Any, campaign: _Campaign) -> None:
         try:
             await _cleanup_open_orders(client, campaign)
         except Exception:
-            logger.exception(
-                "Fishing campaign %s: cleanup after crash also failed", campaign.id
-            )
+            logger.exception("Fishing campaign %s: cleanup after crash also failed", campaign.id)
     finally:
-        logger.info(
-            "Fishing campaign %s ended with status %s", campaign.id, campaign.status
-        )
+        logger.info("Fishing campaign %s ended with status %s", campaign.id, campaign.status)
 
 
 # ===== Public tools =====
@@ -649,9 +606,7 @@ async def place_option_order_with_fishing(
         float,
         "Terminal (least favorable) limit price. The campaign stops adjusting past this.",
     ],
-    step: Annotated[
-        float | None, "Price step per adjustment (default 0.05)"
-    ] = _DEFAULT_STEP,
+    step: Annotated[float | None, "Price step per adjustment (default 0.05)"] = _DEFAULT_STEP,
     pattern: Annotated[
         str | None,
         "Step pattern: 'random_walk' (default, randomized + head-fakes), 'linear' (all chunks step together), or 'staggered' (initial ladder).",
@@ -668,20 +623,15 @@ async def place_option_order_with_fishing(
         float | None,
         "±jitter on interval as a fraction (0.0-1.0; default 0.4 ≈ ±40%). 0 = perfectly metronomic.",
     ] = _DEFAULT_JITTER_PCT,
-    session: Annotated[
-        str | None, "Trading session: NORMAL (default), AM, PM, or SEAMLESS"
-    ] = "NORMAL",
-    duration: Annotated[
-        str | None, "Order duration: DAY (default), GOOD_TILL_CANCEL"
-    ] = "DAY",
+    session: Annotated[str | None, "Trading session: NORMAL (default), AM, PM, or SEAMLESS"] = "NORMAL",
+    duration: Annotated[str | None, "Order duration: DAY (default), GOOD_TILL_CANCEL"] = "DAY",
 ) -> JSONType:
-    """
-    Place a chunked, range-fishing option campaign with a single approval.
+    """Place a chunked, range-fishing option campaign with a single approval.
 
     The campaign places multiple LIMIT child orders ("chunks") across a price
     range, then cancel/replaces them periodically toward range_end with
     randomized timing and price-walk patterns to obfuscate the single-trader
-    intent. ONE approval at submission covers the whole campaign — subsequent
+    intent. ONE approval at submission covers the whole campaign; subsequent
     child cancel/place operations run autonomously.
 
     Returns a campaign descriptor including campaign_id. Poll get_fishing_status
@@ -710,14 +660,8 @@ async def place_option_order_with_fishing(
         float(step if step is not None else _DEFAULT_STEP),
         pattern or PATTERN_RANDOM_WALK,
         chunks,
-        float(
-            step_interval_seconds
-            if step_interval_seconds is not None
-            else _DEFAULT_INTERVAL_SEC
-        ),
-        float(
-            timing_jitter_pct if timing_jitter_pct is not None else _DEFAULT_JITTER_PCT
-        ),
+        float(step_interval_seconds if step_interval_seconds is not None else _DEFAULT_INTERVAL_SEC),
+        float(timing_jitter_pct if timing_jitter_pct is not None else _DEFAULT_JITTER_PCT),
     )
 
     campaign_id = str(uuid.uuid4())
@@ -733,13 +677,9 @@ async def place_option_order_with_fishing(
         step=float(step if step is not None else _DEFAULT_STEP),
         pattern=pattern_resolved,
         step_interval_seconds=float(
-            step_interval_seconds
-            if step_interval_seconds is not None
-            else _DEFAULT_INTERVAL_SEC
+            step_interval_seconds if step_interval_seconds is not None else _DEFAULT_INTERVAL_SEC
         ),
-        timing_jitter_pct=float(
-            timing_jitter_pct if timing_jitter_pct is not None else _DEFAULT_JITTER_PCT
-        ),
+        timing_jitter_pct=float(timing_jitter_pct if timing_jitter_pct is not None else _DEFAULT_JITTER_PCT),
         session=session or "NORMAL",
         duration=duration or "DAY",
         started_at=datetime.now(timezone.utc),
@@ -750,9 +690,7 @@ async def place_option_order_with_fishing(
         _CAMPAIGNS[campaign_id] = campaign
 
     client = ctx.client
-    task = asyncio.create_task(
-        _run_campaign(client, campaign), name=f"fishing-{campaign_id}"
-    )
+    task = asyncio.create_task(_run_campaign(client, campaign), name=f"fishing-{campaign_id}")
     campaign.task = task
 
     return {
@@ -764,26 +702,18 @@ async def place_option_order_with_fishing(
         "step": float(step if step is not None else _DEFAULT_STEP),
         "pattern": pattern_resolved,
         "step_interval_seconds": float(
-            step_interval_seconds
-            if step_interval_seconds is not None
-            else _DEFAULT_INTERVAL_SEC
+            step_interval_seconds if step_interval_seconds is not None else _DEFAULT_INTERVAL_SEC
         ),
-        "timing_jitter_pct": float(
-            timing_jitter_pct if timing_jitter_pct is not None else _DEFAULT_JITTER_PCT
-        ),
+        "timing_jitter_pct": float(timing_jitter_pct if timing_jitter_pct is not None else _DEFAULT_JITTER_PCT),
         "started_at": campaign.started_at.isoformat(),
     }
 
 
 async def get_fishing_status(
     ctx: SchwabContext,
-    campaign_id: Annotated[
-        str, "Fishing campaign id returned by place_option_order_with_fishing"
-    ],
+    campaign_id: Annotated[str, "Fishing campaign id returned by place_option_order_with_fishing"],
 ) -> JSONType:
-    """
-    Returns the current status of a fishing campaign (chunk-level prices, statuses, fill counts).
-    """
+    """Returns the current status of a fishing campaign (chunk-level prices, statuses, fill counts)."""
     _ = ctx  # unused but required for tool signature
     campaign = _CAMPAIGNS.get(campaign_id)
     if campaign is None:
@@ -795,8 +725,7 @@ async def cancel_fishing(
     ctx: SchwabContext,
     campaign_id: Annotated[str, "Fishing campaign id to terminate"],
 ) -> JSONType:
-    """
-    Terminates a running fishing campaign: cancels the background task, then
+    """Terminates a running fishing campaign: cancels the background task, then
     cancels any sub-orders still working. Returns the final campaign state.
     *Write operation.*
     """
@@ -840,6 +769,7 @@ def register(
     allow_write: bool,
     result_transform: Callable[[Any], Any] | None = None,
 ) -> None:
+    """Register fishing tools with the MCP server."""
     for func in _READ_ONLY_TOOLS:
         register_tool(server, func, result_transform=result_transform)
     if not allow_write:

@@ -1,4 +1,5 @@
-#
+"""Quote retrieval tools for the Schwab MCP server."""
+
 import re
 from collections.abc import Callable
 from typing import Annotated, Any
@@ -8,7 +9,6 @@ from mcp.server.fastmcp import FastMCP
 from schwab_mcp.context import SchwabContext
 from schwab_mcp.tools._registration import register_tool
 from schwab_mcp.tools.utils import JSONType, call
-
 
 _OPTION_RE = re.compile(r"^([A-Za-z$]+)\s+(\d{6})([PC])(\d+)$")
 
@@ -56,9 +56,7 @@ def _prune_quote(symbol_key: str, entry: dict[str, JSONType]) -> dict[str, JSONT
 def _prune_quotes(payload: JSONType) -> JSONType:
     if not isinstance(payload, dict):
         return payload
-    return {
-        k: _prune_quote(k, v) if isinstance(v, dict) else v for k, v in payload.items()
-    }
+    return {k: _prune_quote(k, v) if isinstance(v, dict) else v for k, v in payload.items()}
 
 
 async def get_quotes(
@@ -71,16 +69,13 @@ async def get_quotes(
         list[str] | str | None,
         "Data fields (list/str): QUOTE, FUNDAMENTAL, EXTENDED, REFERENCE, REGULAR. Default is QUOTE.",
     ] = None,
-    indicative: Annotated[
-        bool | None, "True for indicative quotes (extended hours/futures)"
-    ] = None,
+    indicative: Annotated[bool | None, "True for indicative quotes (extended hours/futures)"] = None,
     verbose: Annotated[
         bool,
         "Return the full raw payload (quote/fundamental/reference/regular blocks) instead of the compact default.",
     ] = False,
 ) -> JSONType:
-    """
-    Returns current market quotes for specified symbols (stocks, ETFs, indices, options).
+    """Returns current market quotes for specified symbols (stocks, ETFs, indices, options).
     Params: symbols (list or comma-separated string), fields (list/str: QUOTE/FUNDAMENTAL/etc.), indicative (bool).
     By default returns compact quote fields only (lastPrice, bidPrice, askPrice, mark, netChange, netPercentChange, highPrice, lowPrice, totalVolume); pass verbose=True for the full raw payload.
     """
@@ -115,6 +110,7 @@ def register(
     allow_write: bool,
     result_transform: Callable[[Any], Any] | None = None,
 ) -> None:
+    """Register quote tools with the MCP server."""
     _ = allow_write
     for func in _READ_ONLY_TOOLS:
         register_tool(server, func, result_transform=result_transform)
