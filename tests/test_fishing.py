@@ -5,6 +5,7 @@ import random
 from typing import Any, cast
 
 import pytest
+from conftest import make_ctx, run
 
 from schwab_mcp.tools import fishing
 from schwab_mcp.tools.fishing import (
@@ -23,9 +24,6 @@ from schwab_mcp.tools.fishing import (
     _SubOrder,
     _validate_inputs,
 )
-
-from conftest import make_ctx, run
-
 
 # ===== Input validation =====
 
@@ -69,11 +67,7 @@ class TestValidateInputs:
 
     def test_buy_wrong_direction_rejected(self):
         with pytest.raises(ValueError, match="BUY: range_start"):
-            _validate_inputs(
-                **self._ok_args(
-                    instruction="BUY_TO_OPEN", range_start=9.0, range_end=8.4
-                )
-            )
+            _validate_inputs(**self._ok_args(instruction="BUY_TO_OPEN", range_start=9.0, range_end=8.4))
 
     def test_zero_quantity_rejected(self):
         with pytest.raises(ValueError, match="quantity must be > 0"):
@@ -158,11 +152,9 @@ def _make_campaign(
         timing_jitter_pct=timing_jitter_pct,
         session="NORMAL",
         duration="DAY",
-        started_at=__import__("datetime").datetime.now(
-            __import__("datetime").timezone.utc
-        ),
+        started_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
         status=STATUS_RUNNING,
-        rng=random.Random(rng_seed),
+        rng=random.Random(rng_seed),  # noqa: S311 - deterministic test seeding, not crypto
     )
 
 
@@ -248,9 +240,7 @@ class TestNextPrice:
             nxt = _next_price(c, sub)
             if nxt is None:
                 break
-            assert (
-                c.range_end <= nxt <= c.range_start + c.step
-            )  # head-fake permits slight overshoot
+            assert c.range_end <= nxt <= c.range_start + c.step  # head-fake permits slight overshoot
             sub.price = nxt
         # Eventually should reach the floor under steady downward bias
         # (200 iterations is plenty)
@@ -283,10 +273,7 @@ class TestSelectSubs:
 
     def test_random_walk_picks_subset(self):
         c = _make_campaign(pattern=PATTERN_RANDOM_WALK, rng_seed=99)
-        c.sub_orders = [
-            _SubOrder(chunk_idx=i, quantity=1, price=9.0, schwab_status="WORKING")
-            for i in range(5)
-        ]
+        c.sub_orders = [_SubOrder(chunk_idx=i, quantity=1, price=9.0, schwab_status="WORKING") for i in range(5)]
         selected = _select_subs_to_adjust(c)
         assert 1 <= len(selected) <= 2
 
@@ -321,7 +308,7 @@ class _FakeOrdersClient:
     """Minimal fake of the schwab orders client.
 
     Tracks placed orders + cancel calls and lets tests control returned
-    statuses. Does not use real HTTP — just records and returns.
+    statuses. Does not use real HTTP, just records and returns.
     """
 
     def __init__(self) -> None:
@@ -333,9 +320,7 @@ class _FakeOrdersClient:
     async def place_order(self, account_hash: str, order_spec: dict[str, Any]):
         oid = str(self._next_id)
         self._next_id += 1
-        self.placed.append(
-            {"order_id": oid, "account_hash": account_hash, "spec": order_spec}
-        )
+        self.placed.append({"order_id": oid, "account_hash": account_hash, "spec": order_spec})
         self.statuses[oid] = {"orderId": oid, "status": "WORKING", "filledQuantity": 0}
 
         # Build a fake response that the response_handler can parse.
@@ -345,9 +330,7 @@ class _FakeOrdersClient:
                 self.url = f"https://api.schwabapi.com/trader/v1/accounts/{ah}/orders"
                 self.text = ""
                 self.content = b""
-                self.headers = {
-                    "Location": f"https://api.schwabapi.com/trader/v1/accounts/{ah}/orders/{oid}"
-                }
+                self.headers = {"Location": f"https://api.schwabapi.com/trader/v1/accounts/{ah}/orders/{oid}"}
                 self.is_error = False
 
             def raise_for_status(self):
@@ -361,9 +344,7 @@ class _FakeOrdersClient:
             self.statuses[order_id]["status"] = "CANCELED"
 
     async def get_order(self, order_id: str, account_hash: str):
-        return self.statuses.get(
-            order_id, {"orderId": order_id, "status": "UNKNOWN", "filledQuantity": 0}
-        )
+        return self.statuses.get(order_id, {"orderId": order_id, "status": "UNKNOWN", "filledQuantity": 0})
 
 
 def _patch_call_to_passthrough(monkeypatch):

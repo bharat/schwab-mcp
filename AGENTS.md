@@ -114,7 +114,7 @@ async def get_movers(
 - Functions/methods: `snake_case`
 - Constants: `UPPER_SNAKE_CASE`
 - Private helpers: prefix with `_` (e.g., `_build_equity_order_spec`)
-- Tool functions: match Schwab API naming (e.g., `get_market_hours`, `place_equity_order`)
+- Tool functions: match Schwab API naming (e.g., `get_market_hours`, `preview_equity_order`)
 
 ### Error Handling
 - Use `SchwabAPIError` for API failures (defined in `tools/utils.py`)
@@ -234,3 +234,18 @@ causing oversized responses that exceeded context limits.
 Default from_date to today and to_date to today + 60 days when both
 are omitted. This matches typical option trading horizons.
 ```
+
+## Repository Map
+
+A full codemap is available at `codemap.md` in the project root.
+
+Before working on any task, read `codemap.md` to understand:
+- Project architecture and entry points
+- Directory responsibilities and design patterns
+- Data flow and integration points between modules
+
+For deep work on a specific folder, also read that folder's `codemap.md`.
+
+When changing source code, update the relevant `codemap.md` files if the
+change alters module responsibilities, entry points, control flow,
+integration points, or directory structure.

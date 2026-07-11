@@ -1,9 +1,9 @@
 from enum import Enum
 
+from conftest import make_ctx, run
+
 from schwab_mcp.tools import quotes
 from schwab_mcp.tools.quotes import _normalize_option_symbol
-
-from conftest import make_ctx, run
 
 
 class DummyQuotesClient:

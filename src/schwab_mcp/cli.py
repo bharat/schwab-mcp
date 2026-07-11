@@ -1,13 +1,14 @@
-import click
+"""Click CLI commands for schwab-mcp: auth, server, save-credentials."""
+
 import logging
-import sys
-import anyio
 import os
+import sys
+
+import anyio
+import click
 from schwab.client import AsyncClient
 
-from schwab_mcp.server import SchwabMCPServer, send_error_response
-from schwab_mcp import auth as schwab_auth
-from schwab_mcp import tokens
+from schwab_mcp import auth as schwab_auth, tokens
 from schwab_mcp.approvals import (
     DiscordApprovalManager,
     DiscordApprovalSettings,
@@ -15,7 +16,7 @@ from schwab_mcp.approvals import (
     SignalApprovalManager,
     SignalApprovalSettings,
 )
-
+from schwab_mcp.server import SchwabMCPServer, send_error_response
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,6 @@ TOKEN_MAX_AGE_SECONDS = schwab_auth.DEFAULT_MAX_TOKEN_AGE_SECONDS
 @click.group()
 def cli():
     """Schwab Model Context Protocol CLI."""
-    pass
 
 
 @cli.command("auth")
@@ -89,8 +89,8 @@ def auth(
 ) -> int:
     """Initialize Schwab client authentication."""
     creds = tokens.load_credentials(tokens.credentials_path(APP_NAME))
-    client_id = client_id or creds.get("client_id")
-    client_secret = client_secret or creds.get("client_secret")
+    client_id = client_id or creds.client_id
+    client_secret = client_secret or creds.client_secret
     if not client_id or not client_secret:
         click.echo(
             "Error: client-id and client-secret are required. "
@@ -111,9 +111,7 @@ def auth(
     click.echo(f"  Callback URL: {callback_url}")
     click.echo(f"  Base URL: {base_url}")
     click.echo()
-    click.echo(
-        "IMPORTANT: Verify these match EXACTLY with your Schwab Developer Portal:"
-    )
+    click.echo("IMPORTANT: Verify these match EXACTLY with your Schwab Developer Portal:")
     click.echo("  1. Go to: https://developer.schwab.com/dashboard")
     click.echo("  2. Click on your app")
     click.echo("  3. Compare the 'App Key' and 'Callback URL' values")
@@ -313,9 +311,9 @@ def server(
 ) -> int:
     """Run the Schwab MCP server."""
     creds = tokens.load_credentials(tokens.credentials_path(APP_NAME))
-    client_id = client_id or creds.get("client_id")
-    client_secret = client_secret or creds.get("client_secret")
-    discord_token = discord_token or creds.get("discord_token")
+    client_id = client_id or creds.client_id
+    client_secret = client_secret or creds.client_secret
+    discord_token = discord_token or creds.discord_token
     if not client_id or not client_secret:
         send_error_response(
             "client-id and client-secret are required. "
@@ -378,9 +376,7 @@ def server(
         if not approver_values:
             env_approvers = os.getenv("SCHWAB_MCP_DISCORD_APPROVERS")
             if env_approvers:
-                approver_values = tuple(
-                    value.strip() for value in env_approvers.split(",") if value.strip()
-                )
+                approver_values = tuple(value.strip() for value in env_approvers.split(",") if value.strip())
 
         discord_requested = any(
             (
@@ -450,9 +446,7 @@ def server(
                     account=signal_account,
                     approver_numbers=approver_numbers,
                     timeout_seconds=float(signal_timeout),
-                    account_names=SignalApprovalManager.parse_account_names(
-                        signal_account_name
-                    ),
+                    account_names=SignalApprovalManager.parse_account_names(signal_account_name),
                 )
             )
             allow_write = True

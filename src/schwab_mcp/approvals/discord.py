@@ -1,9 +1,11 @@
+"""Discord-based approval backend using emoji reactions."""
+
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Mapping, Sequence
 
 import discord
 
@@ -13,7 +15,6 @@ from schwab_mcp.approvals.base import (
     ApprovalRequest,
     format_arguments,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +41,7 @@ class _PendingApproval:
 
 
 class _ApprovalClient(discord.Client):
-    def __init__(
-        self, manager: DiscordApprovalManager, intents: discord.Intents
-    ) -> None:
+    def __init__(self, manager: DiscordApprovalManager, intents: discord.Intents) -> None:
         # The base Client expects intents as a keyword-only argument.
         super().__init__(intents=intents)
         self._manager = manager
@@ -61,9 +60,7 @@ class DiscordApprovalManager(ApprovalManager):
 
     def __init__(self, settings: DiscordApprovalSettings) -> None:
         if not settings.approver_ids:
-            raise ValueError(
-                "DiscordApprovalManager requires at least one approver ID."
-            )
+            raise ValueError("DiscordApprovalManager requires at least one approver ID.")
 
         self._settings = settings
         intents = discord.Intents.default()
@@ -84,6 +81,7 @@ class DiscordApprovalManager(ApprovalManager):
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
+        """Start the Discord bot and wait until it is ready."""
         if self._runner is not None:
             return
 
@@ -92,6 +90,7 @@ class DiscordApprovalManager(ApprovalManager):
         await self._ready.wait()
 
     async def stop(self) -> None:
+        """Shut down the Discord bot and clean up its task."""
         if self._runner is None:
             return
 
@@ -106,14 +105,14 @@ class DiscordApprovalManager(ApprovalManager):
             self._channel = None
 
     async def require(self, request: ApprovalRequest) -> ApprovalDecision:
+        """Post an approval request to Discord and wait for a reaction."""
         await self.start()
         channel = await self._ensure_channel()
 
         rendered_args = self._format_arguments(request.arguments)
         if len(rendered_args) > _ARGUMENTS_FIELD_LIMIT:
             logger.warning(
-                "Auto-denying approval %s for tool '%s': arguments too large "
-                "to display in full (%d chars)",
+                "Auto-denying approval %s for tool '%s': arguments too large to display in full (%d chars)",
                 request.id,
                 request.tool_name,
                 len(rendered_args),
@@ -133,21 +132,15 @@ class DiscordApprovalManager(ApprovalManager):
             try:
                 await channel.send(embed=embed)
             except discord.HTTPException:
-                logger.exception(
-                    "Failed to post auto-deny notice for request %s", request.id
-                )
+                logger.exception("Failed to post auto-deny notice for request %s", request.id)
             return ApprovalDecision.DENIED
 
-        message = await channel.send(
-            embed=self._build_pending_embed(request, rendered_args)
-        )
+        message = await channel.send(embed=self._build_pending_embed(request, rendered_args))
         try:
             await message.add_reaction("✅")
             await message.add_reaction("❌")
         except discord.HTTPException:
-            logger.exception(
-                "Unable to add approval reactions for request %s", request.id
-            )
+            logger.exception("Unable to add approval reactions for request %s", request.id)
             await self._finalize_message(
                 message,
                 request,
@@ -157,18 +150,14 @@ class DiscordApprovalManager(ApprovalManager):
             )
             return ApprovalDecision.DENIED
 
-        future: asyncio.Future[ApprovalDecision] = (
-            asyncio.get_running_loop().create_future()
-        )
+        future: asyncio.Future[ApprovalDecision] = asyncio.get_running_loop().create_future()
         pending = _PendingApproval(request=request, future=future, message=message)
 
         async with self._lock:
             self._pending[message.id] = pending
 
         try:
-            decision = await asyncio.wait_for(
-                future, timeout=self._settings.timeout_seconds
-            )
+            decision = await asyncio.wait_for(future, timeout=self._settings.timeout_seconds)
         except asyncio.TimeoutError:
             decision = ApprovalDecision.EXPIRED
             await self._finalize_message(
@@ -198,9 +187,7 @@ class DiscordApprovalManager(ApprovalManager):
         logger.info("Discord approval manager connected as %s", self._client.user)
         self._ready.set()
 
-    async def _handle_reaction_add(
-        self, reaction: discord.Reaction, user: discord.User | discord.Member
-    ) -> None:
+    async def _handle_reaction_add(self, reaction: discord.Reaction, user: discord.User | discord.Member) -> None:
         if user.bot:
             return
 
@@ -227,14 +214,10 @@ class DiscordApprovalManager(ApprovalManager):
             try:
                 await reaction.remove(user)
             except discord.HTTPException:
-                logger.warning(
-                    "Failed to remove unauthorized reaction from user %s", user.id
-                )
+                logger.warning("Failed to remove unauthorized reaction from user %s", user.id)
             return
 
-        decision = (
-            ApprovalDecision.APPROVED if emoji == "✅" else ApprovalDecision.DENIED
-        )
+        decision = ApprovalDecision.APPROVED if emoji == "✅" else ApprovalDecision.DENIED
 
         if pending.future.done():
             return
@@ -266,9 +249,7 @@ class DiscordApprovalManager(ApprovalManager):
         self._channel = channel
         return channel
 
-    def _build_pending_embed(
-        self, request: ApprovalRequest, rendered_args: str
-    ) -> discord.Embed:
+    def _build_pending_embed(self, request: ApprovalRequest, rendered_args: str) -> discord.Embed:
         embed = discord.Embed(
             title="Write operation requires approval",
             description=f"Tool `{request.tool_name}` requested write access.",
@@ -302,17 +283,13 @@ class DiscordApprovalManager(ApprovalManager):
         if request.client_id:
             embed.add_field(name="Client ID", value=request.client_id, inline=False)
         if actor is not None:
-            embed.add_field(
-                name="Actor", value=f"{actor} (ID: {actor.id})", inline=False
-            )
+            embed.add_field(name="Actor", value=f"{actor} (ID: {actor.id})", inline=False)
         if reason:
             embed.add_field(name="Notes", value=reason, inline=False)
         try:
             await message.edit(embed=embed)
         except discord.HTTPException:
-            logger.warning(
-                "Failed to update Discord approval message for request %s", request.id
-            )
+            logger.warning("Failed to update Discord approval message for request %s", request.id)
 
     @staticmethod
     def _format_arguments(arguments: Mapping[str, str]) -> str:

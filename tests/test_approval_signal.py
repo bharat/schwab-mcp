@@ -1,5 +1,6 @@
 import asyncio
-from typing import Any, Awaitable, TypeVar
+from collections.abc import Awaitable
+from typing import Any, TypeVar
 
 import pytest
 
@@ -8,8 +9,8 @@ from schwab_mcp.approvals import (
     ApprovalRequest,
     SignalApprovalManager,
     SignalApprovalSettings,
+    signal as signal_mod,
 )
-from schwab_mcp.approvals import signal as signal_mod
 
 T = TypeVar("T")
 
@@ -61,9 +62,7 @@ def _request(**overrides: Any) -> ApprovalRequest:
     return ApprovalRequest(**base)
 
 
-def _reply(
-    quoted_ts: int, text: str, *, source: str = "+15555550199"
-) -> dict[str, Any]:
+def _reply(quoted_ts: int, text: str, *, source: str = "+15555550199") -> dict[str, Any]:
     return {
         "envelope": {
             "sourceNumber": source,
@@ -114,9 +113,7 @@ def test_require_approves_on_sync_message_reply(
             {
                 "envelope": {
                     "sourceNumber": "+15555550199",
-                    "syncMessage": {
-                        "sentMessage": {"message": "ok", "quote": {"id": sent_ts}}
-                    },
+                    "syncMessage": {"sentMessage": {"message": "ok", "quote": {"id": sent_ts}}},
                 }
             }
         )
@@ -317,10 +314,7 @@ def test_render_body_renders_cancel_order() -> None:
         )
     )
 
-    assert (
-        "Claude Trader wants to cancel order 1006299986057 in the Rollover "
-        "IRA account." in body
-    )
+    assert "Claude Trader wants to cancel order 1006299986057 in the Rollover IRA account." in body
 
 
 def test_render_body_falls_back_to_verbose_for_unknown_tool() -> None:
@@ -340,7 +334,7 @@ def test_render_body_falls_back_to_verbose_for_unknown_tool() -> None:
 def test_render_body_recovers_from_renderer_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A bug in a per-tool renderer must never block approvals — the verbose
+    """A bug in a per-tool renderer must never block approvals; the verbose
     fallback always runs."""
 
     def boom(args: Any, account_names: Any) -> str:
@@ -361,9 +355,7 @@ def test_parse_account_names_handles_comma_split_and_repeats() -> None:
 
 
 def test_parse_account_names_skips_malformed_entries() -> None:
-    parsed = SignalApprovalManager.parse_account_names(
-        ["bogus", "=missing-key", "missing-value=", "5805=OK"]
-    )
+    parsed = SignalApprovalManager.parse_account_names(["bogus", "=missing-key", "missing-value=", "5805=OK"])
     assert dict(parsed) == {"5805": "OK"}
 
 

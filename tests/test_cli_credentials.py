@@ -94,9 +94,7 @@ class TestAuthCredentialsFile:
         monkeypatch.delenv("SCHWAB_CLIENT_SECRET", raising=False)
 
         runner = CliRunner()
-        result = runner.invoke(
-            cli.cli, ["auth", "--token-path", str(tmp_path / "t.yaml")]
-        )
+        result = runner.invoke(cli.cli, ["auth", "--token-path", str(tmp_path / "t.yaml")])
 
         assert result.exit_code == 1
         assert "client-id and client-secret are required" in result.output
@@ -110,9 +108,7 @@ class TestServerCredentialsFile:
             captured["easy_client_kwargs"] = kwargs
             return FakeAsyncClient()
 
-        monkeypatch.setattr(
-            cli.tokens, "Manager", lambda p: type("M", (), {"path": p})()
-        )
+        monkeypatch.setattr(cli.tokens, "Manager", lambda p: type("M", (), {"path": p})())
         monkeypatch.setattr(cli.schwab_auth, "easy_client", fake_easy_client)
         monkeypatch.setattr(
             cli,
@@ -191,9 +187,7 @@ class TestServerCredentialsFile:
         monkeypatch.delenv("SCHWAB_CLIENT_SECRET", raising=False)
 
         runner = CliRunner()
-        result = runner.invoke(
-            cli.cli, ["server", "--token-path", str(tmp_path / "t.yaml")]
-        )
+        result = runner.invoke(cli.cli, ["server", "--token-path", str(tmp_path / "t.yaml")])
 
         assert result.exit_code == 1
 
@@ -314,21 +308,15 @@ class TestSaveCredentialsCommand:
 class TestServerDiscordTokenCredentialsFile:
     def _patch_server(self, monkeypatch, captured: dict[str, Any]) -> None:
         monkeypatch.setattr(cli, "AsyncClient", FakeAsyncClient)
-        monkeypatch.setattr(
-            cli.tokens, "Manager", lambda p: type("M", (), {"path": p})()
-        )
-        monkeypatch.setattr(
-            cli.schwab_auth, "easy_client", lambda **kw: FakeAsyncClient()
-        )
+        monkeypatch.setattr(cli.tokens, "Manager", lambda p: type("M", (), {"path": p})())
+        monkeypatch.setattr(cli.schwab_auth, "easy_client", lambda **kw: FakeAsyncClient())
 
         class FakeDiscordSettings:
             def __init__(self, **kwargs):
                 captured["discord_settings"] = kwargs
 
         class FakeDiscordManager:
-            authorized_user_ids = staticmethod(
-                lambda ids: frozenset(ids) if ids else frozenset()
-            )
+            authorized_user_ids = staticmethod(lambda ids: frozenset(ids) if ids else frozenset())
 
             def __init__(self, settings):
                 captured["discord_manager_settings"] = settings
@@ -342,9 +330,7 @@ class TestServerDiscordTokenCredentialsFile:
         )
         monkeypatch.setattr(cli.anyio, "run", lambda func, **kw: None)
 
-    def test_server_reads_discord_token_from_credentials_file(
-        self, monkeypatch, tmp_path
-    ):
+    def test_server_reads_discord_token_from_credentials_file(self, monkeypatch, tmp_path):
         captured: dict[str, Any] = {}
         self._patch_server(monkeypatch, captured)
 

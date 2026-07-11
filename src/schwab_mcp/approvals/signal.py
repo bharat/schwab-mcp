@@ -1,6 +1,9 @@
+"""Signal-based approval backend using a local signal-cli REST daemon."""
+
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from collections.abc import Mapping, Sequence
@@ -66,39 +69,39 @@ class SignalApprovalManager(ApprovalManager):
 
     def __init__(self, settings: SignalApprovalSettings) -> None:
         if not settings.approver_numbers:
-            raise ValueError(
-                "SignalApprovalManager requires at least one approver number."
-            )
+            raise ValueError("SignalApprovalManager requires at least one approver number.")
         self._settings = settings
-        self._client = httpx.AsyncClient(base_url=settings.api_url, timeout=None)
+        # No client-level timeout: approvals long-poll for a human decision
+        # and the per-request timeout is enforced via asyncio.wait_for.
+        self._client = httpx.AsyncClient(base_url=settings.api_url, timeout=None)  # noqa: S113
         self._receiver: asyncio.Task[None] | None = None
         self._pending: dict[int, _PendingApproval] = {}
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
+        """Start the background websocket receive loop (idempotent)."""
         if self._receiver is not None:
             return
         loop = asyncio.get_running_loop()
         self._receiver = loop.create_task(self._receive_loop())
 
     async def stop(self) -> None:
+        """Cancel the receive loop and close the HTTP client."""
         if self._receiver is not None:
             self._receiver.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._receiver
-            except asyncio.CancelledError:
-                pass
             self._receiver = None
         await self._client.aclose()
 
     async def require(self, request: ApprovalRequest) -> ApprovalDecision:
+        """Post the approval request over Signal and wait for a reply decision."""
         await self.start()
 
         body = self._render_body(request)
         if len(body) > _BODY_LIMIT:
             logger.warning(
-                "Auto-denying approval %s for tool '%s': body too large to "
-                "display in full (%d chars)",
+                "Auto-denying approval %s for tool '%s': body too large to display in full (%d chars)",
                 request.id,
                 request.tool_name,
                 len(body),
@@ -111,19 +114,13 @@ class SignalApprovalManager(ApprovalManager):
             return ApprovalDecision.DENIED
 
         sent_timestamp = await self._send(body)
-        future: asyncio.Future[ApprovalDecision] = (
-            asyncio.get_running_loop().create_future()
-        )
-        pending = _PendingApproval(
-            request=request, future=future, sent_timestamp=sent_timestamp
-        )
+        future: asyncio.Future[ApprovalDecision] = asyncio.get_running_loop().create_future()
+        pending = _PendingApproval(request=request, future=future, sent_timestamp=sent_timestamp)
         async with self._lock:
             self._pending[sent_timestamp] = pending
 
         try:
-            decision = await asyncio.wait_for(
-                future, timeout=self._settings.timeout_seconds
-            )
+            decision = await asyncio.wait_for(future, timeout=self._settings.timeout_seconds)
         except asyncio.TimeoutError:
             decision = ApprovalDecision.EXPIRED
             await self._send_best_effort(
@@ -156,16 +153,13 @@ class SignalApprovalManager(ApprovalManager):
             logger.exception("Failed to post Signal notice")
 
     async def _receive_loop(self) -> None:
-        ws_url = (
-            self._settings.api_url.replace("http", "ws", 1)
-            + f"/v1/receive/{self._settings.account}"
-        )
+        ws_url = self._settings.api_url.replace("http", "ws", 1) + f"/v1/receive/{self._settings.account}"
         while True:
             try:
                 async with websockets.connect(ws_url) as ws:
                     async for frame in ws:
                         await self._handle_envelope(json.loads(frame))
-            except asyncio.CancelledError:
+            except asyncio.CancelledError:  # noqa: PERF203 - reconnect-on-error loop needs the handler
                 raise
             except Exception:
                 logger.exception("Signal receive websocket error; reconnecting in 5s")
@@ -222,11 +216,10 @@ class SignalApprovalManager(ApprovalManager):
                 summary = renderer(args, self._settings.account_names)
             except Exception:
                 # Never fail the approval just because the friendly renderer
-                # had a bug — fall through to the verbose format so the user
+                # had a bug; fall through to the verbose format so the user
                 # still sees the raw arguments and can decide.
                 logger.exception(
-                    "Friendly renderer failed for tool '%s' (approval %s); "
-                    "falling back to verbose format.",
+                    "Friendly renderer failed for tool '%s' (approval %s); falling back to verbose format.",
                     request.tool_name,
                     request.id,
                 )
@@ -234,13 +227,7 @@ class SignalApprovalManager(ApprovalManager):
                 return f"{summary}\n\n{_FOOTER}"
 
         rendered_args = format_arguments(request.arguments)
-        return (
-            f"{_AGENT_NAME} wants to call: {request.tool_name}\n"
-            f"\n"
-            f"{rendered_args}\n"
-            f"\n"
-            f"{_FOOTER}"
-        )
+        return f"{_AGENT_NAME} wants to call: {request.tool_name}\n\n{rendered_args}\n\n{_FOOTER}"
 
     @staticmethod
     def authorized_numbers(values: Sequence[str] | None) -> frozenset[str]:
@@ -267,8 +254,7 @@ class SignalApprovalManager(ApprovalManager):
                     continue
                 if "=" not in chunk:
                     logger.warning(
-                        "Ignoring malformed account-name entry %r (expected "
-                        "'last4=Name')",
+                        "Ignoring malformed account-name entry %r (expected 'last4=Name')",
                         chunk,
                     )
                     continue
@@ -290,12 +276,13 @@ class SignalApprovalManager(ApprovalManager):
 def _decode_arguments(arguments: Mapping[str, str]) -> dict[str, Any]:
     """Decode the JSON-encoded argument values produced by `_format_argument`
     in `tools/_registration.py`. Falls back to the raw string on a decode
-    failure so a single bad value never sinks the whole renderer."""
+    failure so a single bad value never sinks the whole renderer.
+    """
     decoded: dict[str, Any] = {}
     for name, raw in arguments.items():
         try:
             decoded[name] = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError):  # noqa: PERF203 - per-value fallback is the whole point here
             decoded[name] = raw
     return decoded
 
@@ -348,7 +335,8 @@ def _duration_label(value: Any) -> str:
 
 def _order_descriptor(args: Mapping[str, Any]) -> str:
     """Render the ``(Type, Duration[, session])`` descriptor used at the end
-    of an order message."""
+    of an order message.
+    """
     order_type = str(args.get("order_type") or "MARKET").upper()
     parts: list[str] = []
     if order_type == "MARKET":
@@ -382,18 +370,13 @@ def _order_descriptor(args: Mapping[str, Any]) -> str:
     return f"({', '.join(parts)})"
 
 
-def _render_place_equity_order(
-    args: Mapping[str, Any], account_names: Mapping[str, str]
-) -> str:
+def _render_place_equity_order(args: Mapping[str, Any], account_names: Mapping[str, str]) -> str:
     instruction = str(args.get("instruction") or "").lower() or "trade"
     qty = args.get("quantity") or "?"
     symbol = str(args.get("symbol") or "?")
     account = _account_label(args.get("account_hash"), account_names)
     descriptor = _order_descriptor(args)
-    return (
-        f"{_AGENT_NAME} wants to {instruction} {qty} {symbol} in "
-        f"{account}. {descriptor}"
-    )
+    return f"{_AGENT_NAME} wants to {instruction} {qty} {symbol} in {account}. {descriptor}"
 
 
 def _parse_occ_symbol(symbol: str) -> tuple[str, str, str, str] | None:
@@ -409,12 +392,7 @@ def _parse_occ_symbol(symbol: str) -> tuple[str, str, str, str] | None:
     cp = symbol[12:13].upper()
     strike_raw = symbol[13:]
     if not (
-        underlying
-        and yy.isdigit()
-        and mm.isdigit()
-        and dd.isdigit()
-        and cp in ("C", "P")
-        and strike_raw.isdigit()
+        underlying and yy.isdigit() and mm.isdigit() and dd.isdigit() and cp in ("C", "P") and strike_raw.isdigit()
     ):
         return None
     expiry = f"{mm}/{dd}/20{yy}"
@@ -423,9 +401,7 @@ def _parse_occ_symbol(symbol: str) -> tuple[str, str, str, str] | None:
     return underlying, expiry, cp, strike
 
 
-def _render_place_option_order(
-    args: Mapping[str, Any], account_names: Mapping[str, str]
-) -> str:
+def _render_place_option_order(args: Mapping[str, Any], account_names: Mapping[str, str]) -> str:
     raw_instruction = str(args.get("instruction") or "").upper()
     instruction = raw_instruction.lower().replace("_", " ") or "trade"
     qty = args.get("quantity") or "?"
@@ -438,9 +414,7 @@ def _render_place_option_order(
         underlying, expiry, cp, strike = parsed
         kind = "Call" if cp == "C" else "Put"
         contract_word = "contract" if qty == 1 else "contracts"
-        body = (
-            f"{instruction} {qty} {underlying} {expiry} {strike} {kind} {contract_word}"
-        )
+        body = f"{instruction} {qty} {underlying} {expiry} {strike} {kind} {contract_word}"
     else:
         # Fallback: use the raw symbol if it's not OCC-formatted.
         body = f"{instruction} {qty} {symbol}"
@@ -448,17 +422,20 @@ def _render_place_option_order(
     return f"{_AGENT_NAME} wants to {body} in {account}. {descriptor}"
 
 
-def _render_cancel_order(
-    args: Mapping[str, Any], account_names: Mapping[str, str]
-) -> str:
+def _render_cancel_order(args: Mapping[str, Any], account_names: Mapping[str, str]) -> str:
     order_id = args.get("order_id") or "?"
     account = _account_label(args.get("account_hash"), account_names)
     return f"{_AGENT_NAME} wants to cancel order {order_id} in {account}."
 
 
-def _render_place_option_order_with_fishing(
-    args: Mapping[str, Any], account_names: Mapping[str, str]
-) -> str:
+def _render_place_previewed_order(args: Mapping[str, Any], account_names: Mapping[str, str]) -> str:
+    summary = args.get("order_summary") or "?"
+    original_tool = args.get("original_tool") or "a preview tool"
+    account = _account_label(args.get("account_hash"), account_names)
+    return f"{_AGENT_NAME} wants to place a previewed order in {account}: {summary} (previewed via {original_tool})."
+
+
+def _render_place_option_order_with_fishing(args: Mapping[str, Any], account_names: Mapping[str, str]) -> str:
     raw_instruction = str(args.get("instruction") or "").upper()
     instruction = raw_instruction.lower().replace("_", " ") or "trade"
     qty = args.get("quantity") or "?"
@@ -490,10 +467,8 @@ def _render_place_option_order_with_fishing(
 
     timing_parts = []
     if step_interval is not None:
-        try:
+        with contextlib.suppress(TypeError, ValueError):
             timing_parts.append(f"~{int(float(step_interval))}s interval")
-        except (TypeError, ValueError):
-            pass
     if jitter is not None:
         try:
             jitter_pct = int(round(float(jitter) * 100))
@@ -515,22 +490,24 @@ def _render_place_option_order_with_fishing(
 
     return (
         f"{_AGENT_NAME} wants to {instruction} {qty} {contract_desc} in "
-        f"{account}. {range_descriptor}. One approval covers the whole campaign — "
+        f"{account}. {range_descriptor}. One approval covers the whole campaign; "
         f"auto-adjusts within range."
     )
 
 
-def _render_cancel_fishing(
-    args: Mapping[str, Any], account_names: Mapping[str, str]
-) -> str:
+def _render_cancel_fishing(args: Mapping[str, Any], account_names: Mapping[str, str]) -> str:
     _ = account_names  # unused
     campaign_id = args.get("campaign_id") or "?"
     return f"{_AGENT_NAME} wants to cancel fishing campaign {campaign_id} (stops loop + cancels any open sub-orders)."
 
 
 _TOOL_RENDERERS: Mapping[str, Any] = {
+    # place_equity_order/place_option_order no longer exist as MCP tools
+    # (replaced by the preview_* + place_previewed_order flow), but their
+    # renderers are kept as the shared building blocks for order descriptions.
     "place_equity_order": _render_place_equity_order,
     "place_option_order": _render_place_option_order,
+    "place_previewed_order": _render_place_previewed_order,
     "place_option_order_with_fishing": _render_place_option_order_with_fishing,
     "cancel_order": _render_cancel_order,
     "cancel_fishing": _render_cancel_fishing,

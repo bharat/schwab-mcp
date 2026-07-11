@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from contextlib import suppress
 import functools
 import inspect
 import json
@@ -10,13 +8,15 @@ import logging
 import sys
 import types
 import uuid
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from typing import Annotated, Any, Union, cast, get_args, get_origin, get_type_hints
 
-from mcp.server.fastmcp import FastMCP, Context as MCPContext
+from mcp.server.fastmcp import Context as MCPContext, FastMCP
 from mcp.types import ToolAnnotations
-from schwab_mcp.context import SchwabContext
-from schwab_mcp.approvals import ApprovalDecision, ApprovalRequest
 
+from schwab_mcp.approvals import ApprovalDecision, ApprovalRequest
+from schwab_mcp.context import SchwabContext
 
 logger = logging.getLogger(__name__)
 
@@ -94,9 +94,7 @@ def _ensure_schwab_context(func: ToolFn) -> ToolFn:
                     _fastmcp=getattr(value, "_fastmcp", None),
                 )
             else:
-                raise TypeError(
-                    f"Argument '{name}' must be an MCP context, got {type(value)!r}"
-                )
+                raise TypeError(f"Argument '{name}' must be an MCP context, got {type(value)!r}")
 
         result = func(*bound.args, **bound.kwargs)
         if inspect.isawaitable(result):
@@ -126,12 +124,34 @@ def _redact(name: str, value: Any) -> Any:
     return f"…{raw[-4:]}" if len(raw) > 4 else "…"
 
 
+async def run_approval(context: SchwabContext, request: ApprovalRequest) -> ApprovalDecision:
+    """Run an approval request through progress reporting and the configured
+    :class:`ApprovalManager`, returning the resulting decision.
+
+    Shared by the automatic write-tool approval wrapping below and by tools
+    that need to build their own :class:`ApprovalRequest` (e.g. to surface
+    resolved state rather than raw call arguments to the reviewer).
+    """
+    if _has_progress_token(context):
+        await context.report_progress(0, 1, _APPROVAL_WAIT_MESSAGE)
+    keepalive_task = _start_approval_keepalive(context)
+
+    try:
+        decision = await context.approvals.require(request)
+    finally:
+        if keepalive_task is not None:
+            keepalive_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await keepalive_task
+
+    await _report_approval_completion(context, decision)
+    return decision
+
+
 def _wrap_with_approval(func: ToolFn) -> ToolFn:
     signature, ctx_params = _resolve_context_parameters(func)
     if not ctx_params:
-        raise TypeError(
-            f"Write tool '{func.__name__}' must accept a SchwabContext parameter for approval gating."
-        )
+        raise TypeError(f"Write tool '{func.__name__}' must accept a SchwabContext parameter for approval gating.")
 
     @functools.wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -158,9 +178,7 @@ def _wrap_with_approval(func: ToolFn) -> ToolFn:
                 continue
 
         if context is None:
-            raise RuntimeError(
-                f"Write tool '{func.__name__}' missing SchwabContext during invocation."
-            )
+            raise RuntimeError(f"Write tool '{func.__name__}' missing SchwabContext during invocation.")
 
         arguments = {
             name: _format_argument(_redact(name, arg))
@@ -176,19 +194,7 @@ def _wrap_with_approval(func: ToolFn) -> ToolFn:
             arguments=arguments,
         )
 
-        if _has_progress_token(context):
-            await context.report_progress(0, 1, _APPROVAL_WAIT_MESSAGE)
-        keepalive_task = _start_approval_keepalive(context)
-
-        try:
-            decision = await context.approvals.require(request)
-        finally:
-            if keepalive_task is not None:
-                keepalive_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await keepalive_task
-
-        await _report_approval_completion(context, decision)
+        decision = await run_approval(context, request)
         logger.info(
             "Approval decision %s for tool '%s' (approval_id=%s, client_id=%s, request_id=%s)",
             decision.value,
@@ -249,9 +255,7 @@ def _start_approval_keepalive(context: SchwabContext) -> asyncio.Task[None] | No
     return asyncio.create_task(_keepalive())
 
 
-async def _report_approval_completion(
-    context: SchwabContext, decision: ApprovalDecision
-) -> None:
+async def _report_approval_completion(context: SchwabContext, decision: ApprovalDecision) -> None:
     if not _has_progress_token(context):
         return
 
@@ -303,7 +307,6 @@ def register_tool(
     result_transform: Callable[[Any], Any] | None = None,
 ) -> None:
     """Register a Schwab tool using FastMCP's decorator plumbing."""
-
     func = _ensure_schwab_context(func)
     if write:
         func = _wrap_with_approval(func)
@@ -337,4 +340,4 @@ def register_tool(
     )(func)
 
 
-__all__ = ["register_tool"]
+__all__ = ["register_tool", "run_approval"]
