@@ -115,7 +115,7 @@ class TestServerCredentialsFile:
             "SchwabMCPServer",
             lambda *a, **kw: type("S", (), {"run": staticmethod(lambda: None)})(),
         )
-        monkeypatch.setattr(cli.anyio, "run", lambda func, **kw: None)
+        monkeypatch.setattr(cli.anyio, "run", lambda func, *args, **kw: None)
 
     def test_falls_back_to_credentials_file(self, monkeypatch, tmp_path):
         captured: dict[str, Any] = {}
@@ -328,7 +328,7 @@ class TestServerDiscordTokenCredentialsFile:
             "SchwabMCPServer",
             lambda *a, **kw: type("S", (), {"run": staticmethod(lambda: None)})(),
         )
-        monkeypatch.setattr(cli.anyio, "run", lambda func, **kw: None)
+        monkeypatch.setattr(cli.anyio, "run", lambda func, *args, **kw: None)
 
     def test_server_reads_discord_token_from_credentials_file(self, monkeypatch, tmp_path):
         captured: dict[str, Any] = {}
