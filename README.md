@@ -57,6 +57,10 @@ Start the MCP server to expose the tools to your MCP client.
 # Basic Read-Only Mode (Safest) — credentials read from save-credentials file
 schwab-mcp server
 
+# Streamable HTTP (for reverse proxies / remote MCP connectors)
+schwab-mcp server --client-id YOUR_KEY --client-secret YOUR_SECRET \
+  --http --host 127.0.0.1 --port 8000
+
 # With Trading Enabled (Discord approval)
 schwab-mcp server \
   --discord-channel-id CHANNEL_ID \
@@ -67,6 +71,10 @@ schwab-mcp server \
   --signal-account +15555550100 \
   --signal-approver +15555550199
 ```
+
+Default transport is **stdio** (Claude Desktop and most local MCP clients).
+Use `--http` for FastMCP streamable-http when fronting the server with a
+gateway or remote connector (MCP endpoint is `/mcp` on the bound host:port).
 
 > **Note**: For trading capabilities you must configure an approval backend.
 > See the [Discord Setup Guide](docs/discord-setup.md) or
@@ -91,6 +99,9 @@ You can configure the server using CLI flags or Environment Variables.
 | `--signal-approver` | `SCHWAB_MCP_SIGNAL_APPROVERS` | E.164 number allowed to approve trades (repeatable). |
 | `--signal-account-name` | `SCHWAB_MCP_SIGNAL_ACCOUNT_NAMES` | Friendly name for an account in approval messages, keyed by the last 4 chars of its hash (e.g. `5805=Rollover IRA`). Repeatable or comma-separated. |
 | `--token-path` | N/A | Path to save/load token (default: `~/.local/share/...`). |
+| `--http` | N/A | Use streamable-http transport instead of stdio. |
+| `--host` | `MCP_HOST` | Bind address when using `--http` (default: `127.0.0.1`). |
+| `--port` | `MCP_PORT` | Bind port when using `--http` (default: `8000`). |
 | `--jesus-take-the-wheel`| N/A | **DANGER**. Bypasses approval for trades. |
 | `--no-technical-tools` | N/A | Disables technical analysis tools (SMA, RSI, etc.). |
 | `--json` | N/A | Returns JSON instead of formatted text (useful for some agents). Null/empty fields are stripped to reduce token usage. |
