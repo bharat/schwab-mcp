@@ -22,7 +22,7 @@ Provides the approval abstraction and the Discord- and Signal-backed implementat
 
 ## Flow
 
-1. The server lifecycle calls `approval_manager.start()` before exposing the FastMCP context and `stop()` during shutdown.
+1. The server lifecycle calls `approval_manager.start()` before exposing the MCPServer context and `stop()` during shutdown.
 2. A write consumer builds an `ApprovalRequest` and calls `ApprovalManager.require()` (usually through `tools._registration.run_approval()`).
 3. For Discord approvals, `require()` ensures the bot is connected and the configured channel is messageable, posts an orange pending embed, and adds ✅/❌ reactions.
 4. The request is stored in `_pending` with a future. `require()` waits for that future with `timeout_seconds`.
@@ -39,7 +39,7 @@ Provides the approval abstraction and the Discord- and Signal-backed implementat
   - Signal settings (`--signal-account`, `--signal-approver`, etc.) select `SignalApprovalManager` the same way; configuring both Discord and Signal at once is rejected.
   - `--jesus-take-the-wheel` selects `NoOpApprovalManager`, enables write tools, and warns that every write executes with no human approval; each auto-approval is also logged at WARNING.
   - Without a configured backend or bypass mode, `NoOpApprovalManager` is still provided to the server, but write tools are not registered.
-- `server.py` receives an `ApprovalManager`, starts/stops it in the FastMCP lifespan, and stores it in `SchwabServerContext`.
+- `server.py` receives an `ApprovalManager`, starts/stops it in the MCPServer lifespan, and stores it in `SchwabServerContext`.
 - `context.py` exposes the active manager as `SchwabContext.approvals` for tool code.
 - `tools/_registration.py` is the primary consumer for automatically gated write tools: `register_tool(..., write=True)` wraps the function, creates an `ApprovalRequest` from formatted call arguments, reports MCP progress while waiting, calls `context.approvals.require()`, and only invokes the tool on `APPROVED`; `DENIED` raises `PermissionError`, `EXPIRED` raises `TimeoutError`.
 - `tools/orders.py` is a specialized consumer: `place_previewed_order()` builds its own request using the cached preview summary instead of raw arguments, then uses `run_approval()` directly before placing the order. Automatic wrapping is bypassed for that tool while preserving destructive/write annotations.

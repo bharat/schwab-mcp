@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Annotated, Any, cast
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from schwab_mcp.context import SchwabContext
 from schwab_mcp.tools._registration import register_tool
@@ -764,7 +764,7 @@ _WRITE_TOOLS = (place_option_order_with_fishing, cancel_fishing)
 
 
 def register(
-    server: FastMCP,
+    server: MCPServer,
     *,
     allow_write: bool,
     result_transform: Callable[[Any], Any] | None = None,
