@@ -56,7 +56,7 @@ move helpers.
 - Uses `SchwabContext.price_history`, whose client surface is described by the
   Protocol facades in `tools/_protocols.py`, and uses the shared `call()` helper
   for consistent Schwab error handling and JSON extraction.
-- Shares FastMCP registration behavior with the parent tool package, including
+- Shares MCPServer registration behavior with the parent tool package, including
   context wrapping and optional result transformation.
 - Produces compact, model-friendly responses instead of raw candles or pandas
   objects: metadata plus recent computed values. Callers that need more output

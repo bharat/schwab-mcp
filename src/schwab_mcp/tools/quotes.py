@@ -4,7 +4,7 @@ import re
 from collections.abc import Callable
 from typing import Annotated, Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from schwab_mcp.context import SchwabContext
 from schwab_mcp.tools._registration import register_tool
@@ -105,7 +105,7 @@ _READ_ONLY_TOOLS = (get_quotes,)
 
 
 def register(
-    server: FastMCP,
+    server: MCPServer,
     *,
     allow_write: bool,
     result_transform: Callable[[Any], Any] | None = None,

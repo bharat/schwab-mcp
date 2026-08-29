@@ -4,7 +4,7 @@
 
 MCP tool layer for the Schwab API. It exposes read-only market/account data,
 transaction and order lookup, option chains, price history, and gated order
-actions through FastMCP tools. Modules keep Schwab client calls small and typed,
+actions through MCPServer tools. Modules keep Schwab client calls small and typed,
 normalize user-friendly string/date inputs, and shape large Schwab payloads into
 compact defaults with `verbose=True` escape hatches where response size matters.
 
@@ -12,7 +12,7 @@ compact defaults with `verbose=True` escape hatches where response size matters.
 
 - `__init__.py` is the aggregator: `register_tools()` calls each module's
   `register()` and conditionally adds `technical/` tools when enabled.
-- `_registration.py` centralizes FastMCP registration. `register_tool()` converts
+- `_registration.py` centralizes MCPServer registration. `register_tool()` converts
   MCP `Context` arguments into `SchwabContext`, attaches read/write annotations,
   applies optional `result_transform`, and wraps write tools in the approval
   workflow unless a tool supplies custom approval handling.
@@ -49,7 +49,7 @@ compact defaults with `verbose=True` escape hatches where response size matters.
 1. Server startup calls `register_tools(server, client, allow_write, ...)`.
 2. Each module registers its read-only tuple through `register_tool()`; `orders`
    only registers write tools when `allow_write=True`.
-3. At invocation, FastMCP passes an MCP context. Registration wrappers convert it
+3. At invocation, MCPServer passes an MCP context. Registration wrappers convert it
    to `SchwabContext`, whose typed Protocol-backed properties expose the relevant
    Schwab client facade.
 4. Tool functions parse strings/dates, map enum names through Schwab client
@@ -69,7 +69,7 @@ compact defaults with `verbose=True` escape hatches where response size matters.
 - Depends on `schwab_mcp.context.SchwabContext` for per-request access to the
   Schwab async client facades, approval manager, preview cache, request metadata,
   and progress/warning reporting.
-- Uses FastMCP's `server.tool()` through `_registration.register_tool()` so tool
+- Uses MCPServer's `server.tool()` through `_registration.register_tool()` so tool
   docs, annotations, and parameter metadata come from Python signatures/docstrings.
 - Integrates with `schwab_mcp.approvals` for write safeguards: automatic approval
   wrapping for simple writes and explicit approval requests for previewed order
