@@ -11,14 +11,18 @@ from schwab.orders.common import (
 from schwab.orders.generic import OrderBuilder
 
 
-def _price_str(price: float) -> str:
+def _price_str(price: float | str) -> str:
     """Format a price the way schwab-py used to before deprecating float input.
 
     schwab-py's ``set_price``/``set_stop_price`` warn on floats and will drop
     support; passing a string skips their truncation. Replicate that
     truncation here so the wire format stays identical: 4 decimals for
     sub-dollar prices, 2 decimals otherwise, truncated (not rounded).
+    Strings pass through unchanged: upstream's order entry points already
+    format via _format_order_price before reaching these builders.
     """
+    if isinstance(price, str):
+        return price
     if price != 0.0 and abs(price) < 1:
         return f"{int(price * 10000) / 10000.0:.4f}"
     return f"{int(price * 100) / 100.0:.2f}"
