@@ -1,10 +1,13 @@
 import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from conftest import DummyInstrumentsResponse, make_ctx, run
+from mcp.server.mcpserver import MCPServer
 
+from schwab_mcp.approvals import ApprovalDecision
 from schwab_mcp.tools import orders
 from schwab_mcp.tools.utils import SchwabAPIError
 
@@ -397,42 +400,28 @@ class TestCancelOrder:
         # sample_order only contains compact fields, so pruning is a no-op.
         assert result == sample_order
 
-    def test_returns_fallback_when_get_order_returns_no_data(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "status_fetch",
+        [
+            pytest.param(None, id="empty-response"),
+            pytest.param(
+                SchwabAPIError(status_code=404, url="/order", body="not found"),
+                id="api-error",
+            ),
+        ],
+    )
+    def test_returns_fallback_when_status_fetch_fails(self, monkeypatch, status_fetch):
+        """Return a fallback when fetching the canceled order fails or is empty."""
         calls: list[Any] = []
 
         async def fake_call(func, *args, **kwargs):
+            """Return the cancel response and the configured status response."""
             calls.append(func)
             if len(calls) == 1:
-                return None  # cancel_order succeeds
-            return None  # get_order returns empty body (e.g. 204)
-
-        monkeypatch.setattr(orders, "call", fake_call)
-
-        class DummyClient:
-            async def cancel_order(self, *args, **kwargs):
                 return None
-
-            async def get_order(self, *args, **kwargs):
-                return None
-
-        client = DummyClient()
-        ctx = make_ctx(client)
-        result = run(orders.cancel_order(ctx, "hash123", "order456"))
-
-        assert result == {
-            "orderId": "order456",
-            "status": "PENDING_CANCEL",
-            "note": "Cancel submitted; status fetch failed",
-        }
-
-    def test_returns_fallback_when_get_order_fails(self, monkeypatch):
-        calls: list[Any] = []
-
-        async def fake_call(func, *args, **kwargs):
-            calls.append(func)
-            if len(calls) == 1:
-                return None  # cancel_order succeeds
-            raise SchwabAPIError(status_code=404, url="/order", body="not found")
+            if isinstance(status_fetch, Exception):
+                raise status_fetch
+            return status_fetch
 
         monkeypatch.setattr(orders, "call", fake_call)
 
@@ -508,17 +497,28 @@ class TestPlacePreviewedOrder:
             order_spec,
             "preview_equity_order",
             "BUY 100 AAPL LIMIT @ $150.00",
+            operation=orders.PreviewOperation.PLACE_ORDER,
         )
+
+    def _make_preview_context(self, account_hash: str, order_spec: dict[str, Any]) -> tuple[Any, str]:
+        """Create a context with a cached preview entry.
+
+        Args:
+            account_hash: Account associated with the cached order.
+            order_spec: Order specification to cache.
+
+        Returns:
+            The test context and its preview identifier.
+        """
+        ctx = make_ctx(DummyPreviewClient())
+        return ctx, self._put_entry(ctx, account_hash, order_spec)
 
     def test_approved_submits_cached_spec(self, monkeypatch, account_hash, order_spec):
         """Happy path: approved decision calls place_order with the exact cached
         spec, then fetches and returns the placed order's details."""
-        from schwab_mcp.approvals import ApprovalDecision
         from schwab_mcp.tools import orders as orders_mod
 
-        client = DummyPreviewClient()
-        ctx = make_ctx(client)
-        preview_id = self._put_entry(ctx, account_hash, order_spec)
+        ctx, preview_id = self._make_preview_context(account_hash, order_spec)
 
         placed_order = {
             "orderId": 42,
@@ -529,16 +529,18 @@ class TestPlacePreviewedOrder:
         calls: list[dict] = []
 
         async def fake_call(func, *args, **kwargs):
+            """Return a placement response followed by the placed order."""
             calls.append({"func": func, "kwargs": kwargs})
             if len(calls) == 1:
                 return {"orderId": 42, "accountHash": account_hash}
             return placed_order
 
-        async def fake_run_approval(ctx, request):
-            return ApprovalDecision.APPROVED
-
         monkeypatch.setattr(orders_mod, "call", fake_call)
-        monkeypatch.setattr(orders_mod, "run_approval", fake_run_approval)
+        monkeypatch.setattr(
+            orders_mod,
+            "run_approval",
+            AsyncMock(return_value=ApprovalDecision.APPROVED),
+        )
 
         result = run(orders.place_previewed_order(ctx, account_hash, preview_id))
 
@@ -554,96 +556,42 @@ class TestPlacePreviewedOrder:
         assert calls[1]["kwargs"]["order_id"] == "42"
         assert calls[1]["kwargs"]["account_hash"] == account_hash
 
-    def test_returns_fallback_when_get_order_fails(self, monkeypatch, account_hash, order_spec):
-        """If the post-placement get_order fetch fails, fall back to a minimal
-        note instead of masking the successful placement."""
-        from schwab_mcp.approvals import ApprovalDecision
+    @pytest.mark.parametrize(
+        "status_fetch",
+        [
+            pytest.param(
+                SchwabAPIError(status_code=404, url="/order", body="not found"),
+                id="api-error",
+            ),
+            pytest.param(
+                ValueError("Expected JSON response from Schwab endpoint"),
+                id="value-error",
+            ),
+            pytest.param(None, id="empty-response"),
+        ],
+    )
+    def test_returns_fallback_when_status_fetch_fails(self, monkeypatch, account_hash, order_spec, status_fetch):
+        """Fall back when the post-placement status fetch fails or is empty."""
         from schwab_mcp.tools import orders as orders_mod
-        from schwab_mcp.tools.utils import SchwabAPIError
 
-        client = DummyPreviewClient()
-        ctx = make_ctx(client)
-        preview_id = self._put_entry(ctx, account_hash, order_spec)
-
+        ctx, preview_id = self._make_preview_context(account_hash, order_spec)
         calls: list[dict] = []
 
         async def fake_call(func, *args, **kwargs):
+            """Return placement data and the configured status-fetch result."""
             calls.append({"func": func, "kwargs": kwargs})
             if len(calls) == 1:
                 return {"orderId": 42, "accountHash": account_hash}
-            raise SchwabAPIError(status_code=404, url="/order", body="not found")
-
-        async def fake_run_approval(ctx, request):
-            return ApprovalDecision.APPROVED
-
-        monkeypatch.setattr(orders_mod, "call", fake_call)
-        monkeypatch.setattr(orders_mod, "run_approval", fake_run_approval)
-
-        result = run(orders.place_previewed_order(ctx, account_hash, preview_id))
-
-        assert result == {
-            "orderId": "42",
-            "accountHash": account_hash,
-            "note": "Order placed; status fetch failed",
-        }
-
-    def test_returns_fallback_when_get_order_raises_value_error(self, monkeypatch, account_hash, order_spec):
-        """If the post-placement get_order fetch raises ValueError (e.g. the
-        Schwab endpoint returned a non-JSON body), fall back to a minimal
-        note instead of letting the error mask the successful placement."""
-        from schwab_mcp.approvals import ApprovalDecision
-        from schwab_mcp.tools import orders as orders_mod
-
-        client = DummyPreviewClient()
-        ctx = make_ctx(client)
-        preview_id = self._put_entry(ctx, account_hash, order_spec)
-
-        calls: list[dict] = []
-
-        async def fake_call(func, *args, **kwargs):
-            calls.append({"func": func, "kwargs": kwargs})
-            if len(calls) == 1:
-                return {"orderId": 42, "accountHash": account_hash}
-            raise ValueError("Expected JSON response from Schwab endpoint")
-
-        async def fake_run_approval(ctx, request):
-            return ApprovalDecision.APPROVED
+            if isinstance(status_fetch, Exception):
+                raise status_fetch
+            return status_fetch
 
         monkeypatch.setattr(orders_mod, "call", fake_call)
-        monkeypatch.setattr(orders_mod, "run_approval", fake_run_approval)
-
-        result = run(orders.place_previewed_order(ctx, account_hash, preview_id))
-
-        assert result == {
-            "orderId": "42",
-            "accountHash": account_hash,
-            "note": "Order placed; status fetch failed",
-        }
-
-    def test_returns_fallback_when_get_order_returns_no_data(self, monkeypatch, account_hash, order_spec):
-        """If the post-placement get_order fetch returns no data (e.g. empty
-        body), fall back to a minimal note instead of masking the successful
-        placement."""
-        from schwab_mcp.approvals import ApprovalDecision
-        from schwab_mcp.tools import orders as orders_mod
-
-        client = DummyPreviewClient()
-        ctx = make_ctx(client)
-        preview_id = self._put_entry(ctx, account_hash, order_spec)
-
-        calls: list[dict] = []
-
-        async def fake_call(func, *args, **kwargs):
-            calls.append({"func": func, "kwargs": kwargs})
-            if len(calls) == 1:
-                return {"orderId": 42, "accountHash": account_hash}
-            return None
-
-        async def fake_run_approval(ctx, request):
-            return ApprovalDecision.APPROVED
-
-        monkeypatch.setattr(orders_mod, "call", fake_call)
-        monkeypatch.setattr(orders_mod, "run_approval", fake_run_approval)
+        monkeypatch.setattr(
+            orders_mod,
+            "run_approval",
+            AsyncMock(return_value=ApprovalDecision.APPROVED),
+        )
 
         result = run(orders.place_previewed_order(ctx, account_hash, preview_id))
 
@@ -656,77 +604,85 @@ class TestPlacePreviewedOrder:
     def test_no_order_id_skips_get_order(self, monkeypatch, account_hash, order_spec):
         """If the place_order response has no extractable orderId (only a
         Location header), return that payload without attempting get_order."""
-        from schwab_mcp.approvals import ApprovalDecision
         from schwab_mcp.tools import orders as orders_mod
 
-        client = DummyPreviewClient()
-        ctx = make_ctx(client)
-        preview_id = self._put_entry(ctx, account_hash, order_spec)
+        ctx, preview_id = self._make_preview_context(account_hash, order_spec)
 
         calls: list[dict] = []
 
         async def fake_call(func, *args, **kwargs):
+            """Return a placement response without an order identifier."""
             calls.append({"func": func, "kwargs": kwargs})
             return {"location": "https://api.schwabapi.com/orders/123"}
 
-        async def fake_run_approval(ctx, request):
-            return ApprovalDecision.APPROVED
-
         monkeypatch.setattr(orders_mod, "call", fake_call)
-        monkeypatch.setattr(orders_mod, "run_approval", fake_run_approval)
+        monkeypatch.setattr(
+            orders_mod,
+            "run_approval",
+            AsyncMock(return_value=ApprovalDecision.APPROVED),
+        )
 
         result = run(orders.place_previewed_order(ctx, account_hash, preview_id))
 
         assert result == {"location": "https://api.schwabapi.com/orders/123"}
         assert len(calls) == 1
 
-    def test_denied_raises_permission_error(self, monkeypatch, account_hash, order_spec):
-        """DENIED decision raises PermissionError."""
-        from schwab_mcp.approvals import ApprovalDecision
+    @pytest.mark.parametrize(
+        ("decision", "expected_exception", "message", "log_message"),
+        [
+            pytest.param(
+                ApprovalDecision.DENIED,
+                PermissionError,
+                "denied",
+                "Order placement denied by reviewer.",
+                id="denied",
+            ),
+            pytest.param(
+                ApprovalDecision.EXPIRED,
+                TimeoutError,
+                "expired",
+                "Approval request for order placement expired.",
+                id="expired",
+            ),
+        ],
+    )
+    def test_rejected_approval_raises(
+        self,
+        monkeypatch,
+        account_hash,
+        order_spec,
+        caplog,
+        decision,
+        expected_exception,
+        message,
+        log_message,
+    ):
+        """Raise the decision-specific error for denied or expired approval."""
         from schwab_mcp.tools import orders as orders_mod
 
-        client = DummyPreviewClient()
-        ctx = make_ctx(client)
-        preview_id = self._put_entry(ctx, account_hash, order_spec)
+        ctx, preview_id = self._make_preview_context(account_hash, order_spec)
+        monkeypatch.setattr(
+            orders_mod,
+            "run_approval",
+            AsyncMock(return_value=decision),
+        )
 
-        async def fake_run_approval(ctx, request):
-            return ApprovalDecision.DENIED
-
-        monkeypatch.setattr(orders_mod, "run_approval", fake_run_approval)
-
-        with pytest.raises(PermissionError, match="denied"):
+        with pytest.raises(expected_exception, match=message):
             run(orders.place_previewed_order(ctx, account_hash, preview_id))
 
-    def test_expired_raises_timeout_error(self, monkeypatch, account_hash, order_spec):
-        """EXPIRED decision raises TimeoutError."""
-        from schwab_mcp.approvals import ApprovalDecision
-        from schwab_mcp.tools import orders as orders_mod
-
-        client = DummyPreviewClient()
-        ctx = make_ctx(client)
-        preview_id = self._put_entry(ctx, account_hash, order_spec)
-
-        async def fake_run_approval(ctx, request):
-            return ApprovalDecision.EXPIRED
-
-        monkeypatch.setattr(orders_mod, "run_approval", fake_run_approval)
-
-        with pytest.raises(TimeoutError, match="expired"):
-            run(orders.place_previewed_order(ctx, account_hash, preview_id))
+        assert [record.getMessage() for record in caplog.records] == [log_message]
 
     def test_pop_before_approval_denied_consumes_entry(self, monkeypatch, account_hash, order_spec):
         """After a DENIED decision the entry is consumed; a second call raises ValueError."""
-        from schwab_mcp.approvals import ApprovalDecision
         from schwab_mcp.tools import orders as orders_mod
 
-        client = DummyPreviewClient()
-        ctx = make_ctx(client)
-        preview_id = self._put_entry(ctx, account_hash, order_spec)
+        ctx, preview_id = self._make_preview_context(account_hash, order_spec)
 
-        async def fake_run_approval(ctx, request):
-            return ApprovalDecision.DENIED
-
-        monkeypatch.setattr(orders_mod, "run_approval", fake_run_approval)
+        monkeypatch.setattr(
+            orders_mod,
+            "run_approval",
+            AsyncMock(return_value=ApprovalDecision.DENIED),
+        )
 
         with pytest.raises(PermissionError):
             run(orders.place_previewed_order(ctx, account_hash, preview_id))
@@ -739,11 +695,10 @@ class TestPlacePreviewedOrder:
         """Mismatched account_hash raises ValueError before run_approval is called."""
         from schwab_mcp.tools import orders as orders_mod
 
-        client = DummyPreviewClient()
-        ctx = make_ctx(client)
-        preview_id = self._put_entry(ctx, account_hash, order_spec)
+        ctx, preview_id = self._make_preview_context(account_hash, order_spec)
 
         async def fake_run_approval(ctx, request):
+            """Fail if approval runs before the account hash is validated."""
             raise AssertionError("run_approval must not be called for mismatched hash")
 
         monkeypatch.setattr(orders_mod, "run_approval", fake_run_approval)
@@ -761,16 +716,14 @@ class TestPlacePreviewedOrder:
 
     def test_approval_request_includes_summary(self, monkeypatch, account_hash, order_spec):
         """The ApprovalRequest sent to run_approval contains the human-readable summary."""
-        from schwab_mcp.approvals import ApprovalDecision
         from schwab_mcp.tools import orders as orders_mod
 
-        client = DummyPreviewClient()
-        ctx = make_ctx(client)
-        preview_id = self._put_entry(ctx, account_hash, order_spec)
+        ctx, preview_id = self._make_preview_context(account_hash, order_spec)
 
         captured_request: list = []
 
         async def fake_run_approval(ctx, request):
+            """Capture the approval request and deny placement."""
             captured_request.append(request)
             return ApprovalDecision.DENIED
 
@@ -1528,11 +1481,281 @@ class DummyPreviewClient:
         return {"orderId": 999, "orderStrategy": {}, "orderValidationResult": {}}
 
     async def place_order(self, *args: Any, **kwargs: Any) -> Any:
+        """Capture a placement request and return an empty response."""
+        self.captured = {"args": args, "kwargs": kwargs}
+        return {}
+
+    async def replace_order(self, *args: Any, **kwargs: Any) -> Any:
+        """Capture a replacement request and return an empty response."""
         self.captured = {"args": args, "kwargs": kwargs}
         return {}
 
     async def get_order(self, *args: Any, **kwargs: Any) -> Any:
         return {}
+
+
+class TestPreviewReplacementOrder:
+    """Tests for typed replacement previews and their guarded executor."""
+
+    _REPLACEMENT: dict[str, Any] = {
+        "symbol": "AAPL",
+        "quantity": 100,
+        "instruction": "buy",
+        "order_type": "limit",
+        "price": 150.0,
+    }
+
+    def test_previews_single_typed_order_and_binds_target(self, monkeypatch):
+        """A replacement preview stores a normalized single-leg specification."""
+        client = DummyPreviewClient()
+        ctx = make_ctx(client)
+
+        async def fake_call(func, *args, **kwargs):
+            """Return a projected replacement response."""
+            return {"projected": True}
+
+        monkeypatch.setattr(orders, "call", fake_call)
+
+        result = run(
+            orders.preview_replacement_order(
+                ctx,
+                "acc123",
+                "order-9",
+                cast(orders._OrderDescInput, self._REPLACEMENT),
+            )
+        )
+        entry = ctx.previews.pop(
+            result["preview_id"],
+            "acc123",
+            operation=orders.PreviewOperation.REPLACE_ORDER,
+        )
+
+        assert result["preview"] == {"projected": True}
+        assert result["target_order_id"] == "order-9"
+        assert entry.target_order_id == "order-9"
+        assert entry.order_spec["orderType"] == "LIMIT"
+        assert entry.order_spec["orderLegCollection"][0]["instruction"] == "BUY"
+        assert entry.summary == "BUY 100 AAPL LIMIT @ $150.00"
+
+    def test_rejects_raw_or_composite_fields(self):
+        """Replacement validation rejects Schwab payload and composite fields."""
+        raw_payload = {
+            **self._REPLACEMENT,
+            "orderType": "LIMIT",
+        }
+
+        with pytest.raises(ValueError, match="unsupported field"):
+            orders._prepare_replacement_order(raw_payload)
+
+    @pytest.mark.parametrize(
+        ("asset_type", "order_type", "incompatible"),
+        [
+            ("EQUITY", "MARKET", {"price": 150.0}),
+            ("EQUITY", "LIMIT", {"stop_price": 140.0}),
+            ("EQUITY", "TRAILING_STOP", {"price": 150.0}),
+            ("OPTION", "MARKET", {"stop_price": 2.0}),
+            ("OPTION", "LIMIT", {"trail_offset": 1.0}),
+        ],
+    )
+    def test_rejects_incompatible_known_fields(self, asset_type, order_type, incompatible):
+        """Replacement validation rejects fields ignored by the selected builder."""
+        replacement = {
+            "symbol": "SPY 251219C500" if asset_type == "OPTION" else "AAPL",
+            "quantity": 1,
+            "instruction": "BUY_TO_OPEN" if asset_type == "OPTION" else "BUY",
+            "order_type": order_type,
+            "asset_type": asset_type,
+            **incompatible,
+        }
+
+        with pytest.raises(ValueError, match="incompatible"):
+            orders._prepare_replacement_order(replacement)
+
+    def test_normalizes_padded_target_order_id(self, monkeypatch):
+        """Replacement previews strip target order ID padding before binding."""
+        ctx = make_ctx(DummyPreviewClient())
+
+        async def fake_call(func, *args, **kwargs):
+            """Return a projected replacement response."""
+            return {}
+
+        monkeypatch.setattr(orders, "call", fake_call)
+
+        result = run(
+            orders.preview_replacement_order(
+                ctx,
+                "acc123",
+                "  order-9  ",
+                cast(orders._OrderDescInput, self._REPLACEMENT),
+            )
+        )
+
+        assert result["target_order_id"] == "order-9"
+        entry = ctx.previews.pop(
+            result["preview_id"],
+            "acc123",
+            operation=orders.PreviewOperation.REPLACE_ORDER,
+        )
+        assert entry.target_order_id == "order-9"
+
+    def test_rejects_blank_target_order_id(self):
+        """Replacement previews reject target IDs containing only whitespace."""
+        ctx = make_ctx(DummyPreviewClient())
+
+        with pytest.raises(ValueError, match="must not be empty"):
+            run(
+                orders.preview_replacement_order(
+                    ctx,
+                    "acc123",
+                    "   ",
+                    cast(orders._OrderDescInput, self._REPLACEMENT),
+                )
+            )
+
+    @pytest.mark.parametrize(
+        ("asset_type", "instruction", "order_type", "extra", "expected"),
+        [
+            ("OPTION", "SELL_TO_CLOSE", "LIMIT", {"price": 2.5}, "LIMIT"),
+            ("EQUITY", "SELL", "TRAILING_STOP", {"trail_offset": 3.0}, "TRAILING_STOP"),
+        ],
+    )
+    def test_builds_supported_replacement_order_kinds(self, asset_type, instruction, order_type, extra, expected):
+        """Replacement builders support options and equity trailing stops."""
+        replacement = {
+            "symbol": "SPY 251219C500" if asset_type == "OPTION" else "AAPL",
+            "quantity": 1,
+            "instruction": instruction,
+            "order_type": order_type,
+            "asset_type": asset_type,
+            **extra,
+        }
+
+        spec, _ = orders._prepare_replacement_order(replacement)
+
+        assert spec["orderType"] == expected
+
+    def test_replacement_approval_executes_bound_target_and_fetches_status(self, monkeypatch):
+        """Approval executes the cached spec against its bound target order."""
+        from schwab_mcp.approvals import ApprovalDecision
+
+        client = DummyPreviewClient()
+        ctx = make_ctx(client)
+        spec = {"orderType": "LIMIT", "price": "150.00"}
+        preview_id = ctx.previews.put(
+            "acc123",
+            spec,
+            "preview_replacement_order",
+            "BUY 100 AAPL LIMIT @ $150.00",
+            operation=orders.PreviewOperation.REPLACE_ORDER,
+            target_order_id="order-9",
+        )
+        calls: list[dict[str, Any]] = []
+        approval_requests: list[Any] = []
+
+        async def fake_call(func, *args, **kwargs):
+            """Return replacement submission and post-write status."""
+            calls.append({"func": func, "kwargs": kwargs})
+            return {"orderId": "new-order-10"} if len(calls) == 1 else {"orderId": "new-order-10", "status": "WORKING"}
+
+        async def fake_run_approval(ctx, request):
+            """Approve and capture the human-readable replacement request."""
+            approval_requests.append(request)
+            return ApprovalDecision.APPROVED
+
+        monkeypatch.setattr(orders, "call", fake_call)
+        monkeypatch.setattr(orders, "run_approval", fake_run_approval)
+
+        result = run(orders.replace_previewed_order(ctx, "acc123", preview_id))
+
+        assert result == {"orderId": "new-order-10", "status": "WORKING"}
+        assert calls[0]["func"] == client.replace_order
+        assert calls[0]["kwargs"]["account_hash"] == "acc123"
+        assert calls[0]["kwargs"]["order_id"] == "order-9"
+        assert calls[0]["kwargs"]["order_spec"] == spec
+        request = approval_requests[0]
+        assert request.tool_name == "replace_previewed_order"
+        assert request.arguments["target_order_id"] == "order-9"
+        assert request.arguments["order_summary"] == "BUY 100 AAPL LIMIT @ $150.00"
+
+    def test_replacement_returns_fallback_when_status_fetch_fails(self, monkeypatch):
+        """A successful replacement remains visible when status lookup fails."""
+        from schwab_mcp.approvals import ApprovalDecision
+        from schwab_mcp.tools.utils import SchwabAPIError
+
+        ctx = make_ctx(DummyPreviewClient())
+        preview_id = ctx.previews.put(
+            "acc123",
+            {"orderType": "MARKET"},
+            "preview_replacement_order",
+            "BUY 1 AAPL MARKET",
+            operation=orders.PreviewOperation.REPLACE_ORDER,
+            target_order_id="order-9",
+        )
+
+        async def fake_call(func, *args, **kwargs):
+            """Return a replacement ID and fail its status lookup."""
+            if kwargs.get("order_id") == "new-order-10":
+                raise SchwabAPIError(status_code=404, url="/order", body="not found")
+            return {"orderId": "new-order-10"}
+
+        async def fake_run_approval(ctx, request):
+            """Approve the replacement request."""
+            return ApprovalDecision.APPROVED
+
+        monkeypatch.setattr(orders, "call", fake_call)
+        monkeypatch.setattr(orders, "run_approval", fake_run_approval)
+
+        assert run(orders.replace_previewed_order(ctx, "acc123", preview_id)) == {
+            "orderId": "new-order-10",
+            "accountHash": "acc123",
+            "note": "Order replaced; status fetch failed",
+        }
+
+    @pytest.mark.parametrize(
+        ("decision", "error"),
+        [("DENIED", PermissionError), ("EXPIRED", TimeoutError)],
+    )
+    def test_replacement_approval_failures_do_not_write(self, monkeypatch, decision, error):
+        """Denied or expired replacement approval prevents the Schwab write."""
+        from schwab_mcp.approvals import ApprovalDecision
+
+        ctx = make_ctx(DummyPreviewClient())
+        preview_id = ctx.previews.put(
+            "acc123",
+            {"orderType": "MARKET"},
+            "preview_replacement_order",
+            "BUY 1 AAPL MARKET",
+            operation=orders.PreviewOperation.REPLACE_ORDER,
+            target_order_id="order-9",
+        )
+
+        async def fake_run_approval(ctx, request):
+            """Return the requested approval failure decision."""
+            return ApprovalDecision[decision]
+
+        async def fail_call(*args, **kwargs):
+            """Fail if replacement attempts to call Schwab."""
+            raise AssertionError("replacement write must not run")
+
+        monkeypatch.setattr(orders, "run_approval", fake_run_approval)
+        monkeypatch.setattr(orders, "call", fail_call)
+
+        with pytest.raises(error):
+            run(orders.replace_previewed_order(ctx, "acc123", preview_id))
+
+
+def test_registers_replacement_tools_with_write_annotations():
+    """Replacement preview and executor register in the appropriate tool groups."""
+    server = MCPServer(name="orders")
+    orders.register(server, allow_write=True)
+    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
+
+    assert "preview_replacement_order" in tools
+    assert "replace_previewed_order" in tools
+    annotations = tools["replace_previewed_order"].annotations
+    assert annotations is not None
+    assert annotations.read_only_hint is False
+    assert annotations.destructive_hint is True
 
 
 class TestPreviewEquityOrder:
@@ -1592,10 +1815,25 @@ class TestPreviewEquityOrder:
         result = run(orders.preview_equity_order(ctx, "acc123", "AAPL", 100, "BUY", "LIMIT", price=150.0))
 
         preview_id = result["preview_id"]
-        entry = ctx.previews.pop(preview_id, "acc123")
+        entry = ctx.previews.pop(preview_id, "acc123", operation=orders.PreviewOperation.PLACE_ORDER)
         assert entry.account_hash == "acc123"
         assert entry.tool_name == "preview_equity_order"
         assert entry.order_spec["orderType"] == "LIMIT"
+
+    def test_failed_preview_is_not_cached(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A failed preview API call must not leave an executable cache entry."""
+        client = DummyPreviewClient()
+        ctx = make_ctx(client)
+
+        async def fake_call(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("preview failed")
+
+        monkeypatch.setattr(orders, "call", fake_call)
+
+        with pytest.raises(RuntimeError, match="preview failed"):
+            run(orders.preview_equity_order(ctx, "acc123", "AAPL", 100, "BUY", "LIMIT", price=150.0))
+
+        assert ctx.previews._entries == {}
 
     def test_rejects_invalid_order_type(self):
         client = DummyPreviewClient()
@@ -1639,7 +1877,7 @@ class TestPreviewOptionOrder:
 
         result = run(orders.preview_option_order(ctx, "acc123", "SPY 230616C400", 2, "BUY_TO_OPEN", "LIMIT", price=3.0))
 
-        entry = ctx.previews.pop(result["preview_id"], "acc123")
+        entry = ctx.previews.pop(result["preview_id"], "acc123", operation=orders.PreviewOperation.PLACE_ORDER)
         assert entry.tool_name == "preview_option_order"
         assert entry.order_spec["orderLegCollection"][0]["quantity"] == 2
 
@@ -1670,7 +1908,7 @@ class TestPreviewEquityTrailingStopOrder:
 
         result = run(orders.preview_equity_trailing_stop_order(ctx, "acc123", "AAPL", 50, "SELL", trail_offset=5.0))
 
-        entry = ctx.previews.pop(result["preview_id"], "acc123")
+        entry = ctx.previews.pop(result["preview_id"], "acc123", operation=orders.PreviewOperation.PLACE_ORDER)
         assert entry.tool_name == "preview_equity_trailing_stop_order"
         assert "AAPL" in entry.summary
 
@@ -1720,7 +1958,7 @@ class TestPreviewOcoOrder:
             orders.preview_oco_order(ctx, "acc123", self._LIMIT_LEG, self._STOP_LEG)  # type: ignore[arg-type]
         )
 
-        entry = ctx.previews.pop(result["preview_id"], "acc123")
+        entry = ctx.previews.pop(result["preview_id"], "acc123", operation=orders.PreviewOperation.PLACE_ORDER)
         assert entry.tool_name == "preview_oco_order"
         assert "OCO" in entry.summary
 
@@ -1777,7 +2015,7 @@ class TestPreviewTriggerOrder:
             orders.preview_trigger_order(ctx, "acc123", self._make_leg(), [exit_leg])  # type: ignore[arg-type]
         )
 
-        entry = ctx.previews.pop(result["preview_id"], "acc123")
+        entry = ctx.previews.pop(result["preview_id"], "acc123", operation=orders.PreviewOperation.PLACE_ORDER)
         assert entry.tool_name == "preview_trigger_order"
         assert "TRIGGER" in entry.summary
 
@@ -1836,7 +2074,7 @@ class TestPreviewBracketOrder:
             )
         )
 
-        entry = ctx.previews.pop(result["preview_id"], "acc123")
+        entry = ctx.previews.pop(result["preview_id"], "acc123", operation=orders.PreviewOperation.PLACE_ORDER)
         assert entry.tool_name == "preview_bracket_order"
         assert "BRACKET" in entry.summary
         assert "AAPL" in entry.summary
@@ -1958,7 +2196,7 @@ class TestPreviewOptionComboOrder:
 
         result = run(orders.preview_option_combo_order(ctx, "acc123", self._LEGS, "NET_CREDIT", price=1.0))
 
-        entry = ctx.previews.pop(result["preview_id"], "acc123")
+        entry = ctx.previews.pop(result["preview_id"], "acc123", operation=orders.PreviewOperation.PLACE_ORDER)
         assert entry.tool_name == "preview_option_combo_order"
         assert "COMBO" in entry.summary
         assert "NET_CREDIT" in entry.summary
@@ -2139,6 +2377,7 @@ class TestAssetTypeGuard:
             },
             "preview_equity_order",
             "SELL 109 LENDX MARKET",
+            operation=orders.PreviewOperation.PLACE_ORDER,
         )
 
         approval_calls: list[Any] = []
