@@ -66,7 +66,9 @@ schwab-mcp server \
   --discord-channel-id CHANNEL_ID \
   --discord-approver YOUR_USER_ID
 
-# With Trading Enabled (Signal approval)
+# With Trading Enabled (Signal approval; the signal-cli-rest-api daemon
+# must run in MODE=json-rpc or json-rpc-native, other modes cannot stream
+# replies and silently consume them)
 schwab-mcp server \
   --signal-account +15555550100 \
   --signal-approver +15555550199
@@ -178,6 +180,13 @@ uv run pytest
 # Format and Lint
 uv run ruff format . && uv run ruff check .
 ```
+
+### Mutation testing
+
+Run a local mutation campaign with `make mutation` (two workers). The weekly
+GitHub Actions workflow runs Sundays at 07:29 UTC and also supports manual
+runs. CI limits the mutation step to 20 minutes and saves reports for 14 days;
+surviving mutants are informational and do not fail the build by score.
 
 ## License
 

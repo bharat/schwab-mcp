@@ -225,6 +225,7 @@ def _select_write_mode(
                 approver_numbers=approver_numbers,
                 timeout_seconds=float(signal_timeout),
                 account_names=SignalApprovalManager.parse_account_names(signal_account_name),
+                agent_name="Claude Trader",
             )
         )
         return manager, True
@@ -308,7 +309,12 @@ def _select_write_mode(
     default="http://127.0.0.1:8080",
     show_default=True,
     envvar="SCHWAB_MCP_SIGNAL_API_URL",
-    help="Base URL of the local signal-cli REST daemon.",
+    help=(
+        "Base URL of the local signal-cli REST daemon "
+        "(bbernhard/signal-cli-rest-api). The daemon must run in "
+        "MODE=json-rpc (or json-rpc-native); other modes cannot stream "
+        "replies and would silently consume them."
+    ),
 )
 @click.option(
     "--signal-account",
@@ -320,8 +326,11 @@ def _select_write_mode(
     "--signal-approver",
     type=str,
     multiple=True,
-    envvar="SCHWAB_MCP_SIGNAL_APPROVERS",
-    help="E.164 number allowed to approve or deny. Pass multiple times for several reviewers.",
+    help=(
+        "E.164 number allowed to approve or deny. Pass multiple times for "
+        "several reviewers, or set SCHWAB_MCP_SIGNAL_APPROVERS to a "
+        "comma-separated list."
+    ),
 )
 @click.option(
     "--signal-timeout",
@@ -335,12 +344,11 @@ def _select_write_mode(
     "--signal-account-name",
     type=str,
     multiple=True,
-    envvar="SCHWAB_MCP_SIGNAL_ACCOUNT_NAMES",
     help=(
         "Friendly name to display in approval messages for an account, "
         "keyed by the last 4 chars of its hash. Format: 'last4=Name'. "
-        "Pass multiple times or as a comma-separated env value "
-        "(e.g. '5805=Rollover IRA,71F7=Roth IRA')."
+        "Pass multiple times, or set SCHWAB_MCP_SIGNAL_ACCOUNT_NAMES to a "
+        "comma-separated value (e.g. '5805=Rollover IRA,71F7=Roth IRA')."
     ),
 )
 @click.option(
@@ -464,6 +472,24 @@ def server(
             if env_approvers:
                 approver_values = tuple(value.strip() for value in env_approvers.split(",") if value.strip())
 
+        # Signal env vars are comma-split by hand (not via Click's envvar=):
+        # Click splits multiple=True env values on whitespace, which mangles
+        # comma-separated lists and names containing spaces.
+        signal_approver_values: tuple[str, ...] = signal_approver
+        if not signal_approver_values:
+            env_signal_approvers = os.getenv("SCHWAB_MCP_SIGNAL_APPROVERS")
+            if env_signal_approvers:
+                signal_approver_values = tuple(
+                    value.strip() for value in env_signal_approvers.split(",") if value.strip()
+                )
+
+        signal_account_name_values: tuple[str, ...] = signal_account_name
+        if not signal_account_name_values:
+            env_signal_names = os.getenv("SCHWAB_MCP_SIGNAL_ACCOUNT_NAMES")
+            if env_signal_names:
+                # parse_account_names comma-splits each entry itself.
+                signal_account_name_values = (env_signal_names,)
+
         write_mode = _select_write_mode(
             jesus_take_the_wheel=jesus_take_the_wheel,
             discord_token=discord_token,
@@ -472,9 +498,9 @@ def server(
             discord_timeout=discord_timeout,
             signal_api_url=signal_api_url,
             signal_account=signal_account,
-            signal_approver=signal_approver,
+            signal_approver=signal_approver_values,
             signal_timeout=signal_timeout,
-            signal_account_name=signal_account_name,
+            signal_account_name=signal_account_name_values,
         )
         if write_mode is None:
             return 1
