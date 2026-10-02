@@ -3,8 +3,9 @@ from enum import Enum
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
-from conftest import DummyInstrumentsResponse, make_ctx, run
+from conftest import make_ctx, run
 from mcp.server.mcpserver import MCPServer
 
 from schwab_mcp.approvals import ApprovalDecision
@@ -1471,10 +1472,22 @@ class TestPruneOrderTypeGuards:
 
 
 class DummyPreviewClient:
-    """Mock client that supports both place_order and preview_order."""
+    """Mock client that supports both place_order and preview_order.
+
+    Carries the minimal instruments surface (Instrument.Projection plus
+    get_instruments) that the preview flow's assetType guard touches before
+    orders.call is invoked, so preview tests exercise the guard instead of
+    tripping on a missing attribute. The default lookup resolves EQUITY.
+    """
+
+    class Instrument:
+        Projection = Enum("Projection", {"SYMBOL_SEARCH": "symbol-search"})
 
     def __init__(self):
         self.captured: dict[str, Any] | None = None
+
+    async def get_instruments(self, symbol: str, **kwargs: Any) -> Any:
+        return DummyInstrumentsResponse(symbol=symbol)
 
     async def preview_order(self, *args: Any, **kwargs: Any) -> Any:
         self.captured = {"args": args, "kwargs": kwargs}
@@ -2208,30 +2221,85 @@ class TestPreviewOptionComboOrder:
             run(orders.preview_option_combo_order(ctx, "acc123", [self._LEGS[0]], "NET_CREDIT", price=1.0))
 
 
+class DummyInstrumentsResponse:
+    """Mock HTTP response for the guard's get_instruments lookup."""
+
+    def __init__(self, symbol: str = "TEST", asset_type: str | None = "EQUITY") -> None:
+        self.status_code = 200
+        instruments: list[dict[str, Any]] = []
+        if asset_type is not None:
+            instruments.append({"symbol": symbol, "assetType": asset_type})
+        self._payload: Any = {"instruments": instruments}
+        self.headers: dict[str, str] = {}
+        # call() treats an empty body as a no-content response and returns
+        # None, so the mock must advertise a non-empty body for json() to run.
+        self.content = b"{}"
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> Any:
+        return self._payload
+
+
+class FailingInstrumentsResponse:
+    """Mock HTTP response whose raise_for_status fails, as a real API error would.
+
+    The guard's resolver only catches SchwabAPIError/ValueError, so lookup
+    failures must arrive the way call() produces them: an HTTP response whose
+    raise_for_status raises, wrapped into SchwabAPIError.
+    """
+
+    status_code = 503
+    url = "https://example.invalid/v1/instruments"
+    text = "simulated instruments outage"
+    headers: dict[str, str] = {}
+
+    def raise_for_status(self) -> None:
+        raise RuntimeError("503 Service Unavailable")
+
+    def json(self) -> Any:  # pragma: no cover - never reached after raise
+        return {}
+
+
 class DummyGuardedPreviewClient(DummyPreviewClient):
     """Preview client with a get_instruments stub that drives the assetType guard.
 
     Set ``asset_type_override`` to control what the instruments symbol-search
-    lookup resolves to; ``"raise"`` simulates a lookup failure and ``None``
-    simulates an empty instruments list.
+    lookup resolves to; ``"fail"`` simulates an API error during the lookup,
+    ``"timeout"`` simulates a transport-level failure of the request itself,
+    ``"malformed"`` returns a payload whose first entry is not an object, and
+    ``None`` simulates an empty instruments list. Every lookup is recorded
+    in ``instrument_requests`` so tests can assert the guard genuinely ran
+    (or genuinely did not) rather than passing vacuously.
     """
 
     def __init__(self, asset_type: str | None = "EQUITY"):
         super().__init__()
         self.asset_type_override = asset_type
+        self.instrument_requests: list[dict[str, Any]] = []
 
-    async def get_instruments(self, symbol: str, projection: Any) -> Any:
-        if self.asset_type_override == "raise":
-            raise RuntimeError("simulated get_instruments failure")
+    async def get_instruments(self, symbol: str, **kwargs: Any) -> Any:
+        self.instrument_requests.append({"symbol": symbol, **kwargs})
+        if self.asset_type_override == "fail":
+            return FailingInstrumentsResponse()
+        if self.asset_type_override == "timeout":
+            raise httpx.ReadTimeout("simulated instruments timeout")
+        if self.asset_type_override == "malformed":
+            response = DummyInstrumentsResponse(symbol=symbol)
+            response._payload = {"instruments": ["junk"]}
+            return response
         return DummyInstrumentsResponse(symbol=symbol, asset_type=self.asset_type_override)
 
 
 class TestAssetTypeGuard:
-    """Upfront assetType guard, ported to the preview flow (issues #29/#34).
+    """Upfront assetType guard in the preview flow (bharat/schwab-mcp#29, #34).
 
-    Unsupported symbols (mutual funds, fixed income) are rejected at preview
-    time before any Schwab API order call, ETFs pass through, lookup failures
-    degrade gracefully, and place_previewed_order re-checks defensively.
+    Symbols resolving to denylisted asset types (mutual funds, bonds) are
+    rejected at preview time before any Schwab order API call. Everything
+    else, including types the guard has never heard of, passes through for
+    Schwab to validate. Lookup failures degrade gracefully with a logged
+    warning.
     """
 
     @pytest.fixture
@@ -2250,10 +2318,38 @@ class TestAssetTypeGuard:
         err = excinfo.value
         assert err.symbol == "LENDX"
         assert err.resolved_type == "MUTUAL_FUND"
-        assert err.supported == orders._EQUITY_ORDERABLE_ASSET_TYPES
         # Assert on the hint's non-hostname portion; a "Schwab.com" substring
         # check trips CodeQL's URL-sanitization rule.
         assert "Trade > Mutual Funds" in str(err)
+
+    def test_preview_rejects_bond_symbol_with_hint(self, account_hash):
+        """The instruments endpoint labels fixed income BOND; the hint must fire."""
+        client = DummyGuardedPreviewClient("BOND")
+        ctx = make_ctx(client)
+
+        with pytest.raises(orders.UnsupportedAssetTypeError) as excinfo:
+            run(orders.preview_equity_order(ctx, account_hash, "912828YY0", 1, "sell", "market"))
+
+        assert client.captured is None
+        assert "Trade > Bonds" in str(excinfo.value)
+
+    def test_lookup_sends_projection_enum(self, account_hash):
+        """The lookup must pass the client's Projection enum member, not a raw string.
+
+        schwab-py raises ValueError on raw strings when enforce_enums=True
+        (its default); passing the enum keeps the guard working under both
+        settings. Regression test for the guard silently no-opping.
+        """
+        client = DummyGuardedPreviewClient("MUTUAL_FUND")
+        ctx = make_ctx(client)
+
+        with pytest.raises(orders.UnsupportedAssetTypeError):
+            run(orders.preview_equity_order(ctx, account_hash, "LENDX", 1, "sell", "market"))
+
+        assert len(client.instrument_requests) == 1
+        request = client.instrument_requests[0]
+        assert request["symbol"] == "LENDX"
+        assert request["projection"] is client.Instrument.Projection.SYMBOL_SEARCH
 
     def test_preview_rejects_fixed_income_symbol(self, account_hash):
         client = DummyGuardedPreviewClient("FIXED_INCOME")
@@ -2291,110 +2387,156 @@ class TestAssetTypeGuard:
             )
         assert client.captured is None
 
-    @pytest.mark.parametrize("etf_asset_type", ["ETF", "COLLECTIVE_INVESTMENT"])
-    def test_preview_accepts_etf_symbols(self, monkeypatch, account_hash, etf_asset_type):
-        """ETFs place as EQUITY legs on /orders and must not be rejected.
+    @staticmethod
+    def _stub_preview_call(monkeypatch, captured: dict[str, Any]) -> None:
+        """Stub the preview_order API call while letting the guard's lookup run.
 
-        Schwab's instruments symbol-search resolves ETFs to assetType "ETF"
-        (position payloads use "COLLECTIVE_INVESTMENT"); the order endpoint
-        accepts them exactly like common stock. Regression test for the guard
-        wrongly rejecting VTI (found live 2026-07-07).
+        A blanket fake for orders.call would also intercept the guard's
+        instruments lookup and make pass-through tests vacuous; this fake
+        delegates get_instruments to the real call() so the guard genuinely
+        resolves the asset type.
         """
-        client = DummyGuardedPreviewClient(etf_asset_type)
-        ctx = make_ctx(client)
-
-        captured: dict[str, Any] = {}
+        real_call = orders.call
 
         async def fake_call(func, *args, **kwargs):
+            if getattr(func, "__name__", "") == "get_instruments":
+                return await real_call(func, *args, **kwargs)
             captured["kwargs"] = kwargs
             return {}
 
         monkeypatch.setattr(orders, "call", fake_call)
+
+    @pytest.mark.parametrize(
+        "asset_type",
+        ["ETF", "COLLECTIVE_INVESTMENT", "UNKNOWN", "EXTENDED", "INDEX"],
+    )
+    def test_preview_accepts_non_denylisted_symbols(self, monkeypatch, account_hash, asset_type):
+        """Anything not on the denylist passes through for Schwab to validate.
+
+        ETF is the regression case: the guard wrongly rejecting VTI was found
+        live 2026-07-07. UNKNOWN/EXTENDED/INDEX cover the denylist semantics:
+        types the guard does not recognize must never be blocked, because only
+        Schwab knows whether they are orderable.
+        """
+        client = DummyGuardedPreviewClient(asset_type)
+        ctx = make_ctx(client)
+        captured: dict[str, Any] = {}
+        self._stub_preview_call(monkeypatch, captured)
 
         result = run(orders.preview_equity_order(ctx, account_hash, "VTI", 40, "buy", "market"))
 
         assert "preview_id" in result
         order_spec = captured["kwargs"]["order_spec"]
         assert order_spec["orderLegCollection"][0]["instrument"]["symbol"] == "VTI"
+        # The guard genuinely ran and resolved the type; it did not pass vacuously.
+        assert len(client.instrument_requests) == 1
 
-    def test_preview_passes_through_when_lookup_fails(self, monkeypatch, account_hash):
-        """Graceful degradation: a lookup error must not block the order."""
-        client = DummyGuardedPreviewClient("raise")
+    def test_preview_passes_through_when_lookup_fails(self, monkeypatch, caplog, account_hash):
+        """Graceful degradation: a lookup API error must not block the order.
+
+        The fallback is visible: the resolver logs a warning naming the symbol,
+        so a guard that has stopped guarding can be seen in the logs.
+        """
+        client = DummyGuardedPreviewClient("fail")
         ctx = make_ctx(client)
+        captured: dict[str, Any] = {}
+        self._stub_preview_call(monkeypatch, captured)
 
-        async def fake_call(func, *args, **kwargs):
-            return {}
+        with caplog.at_level("WARNING", logger="schwab_mcp.tools.orders"):
+            result = run(orders.preview_equity_order(ctx, account_hash, "AAPL", 100, "buy", "market"))
 
-        monkeypatch.setattr(orders, "call", fake_call)
-
-        result = run(orders.preview_equity_order(ctx, account_hash, "AAPL", 100, "buy", "market"))
         assert "preview_id" in result
+        assert len(client.instrument_requests) == 1
+        assert any("assetType pre-check skipped" in record.getMessage() for record in caplog.records)
 
-    def test_preview_passes_through_when_lookup_returns_no_instruments(self, monkeypatch, account_hash):
-        """An empty `instruments` list is also treated as a non-result."""
+    def test_preview_passes_through_when_lookup_times_out(self, monkeypatch, caplog, account_hash):
+        """Transport failures of the lookup request itself must not block the order.
+
+        call() only wraps raise_for_status, so a timeout or connection error
+        from the instruments request surfaces as httpx.TransportError, not
+        SchwabAPIError. Equity previews never depended on the market-data
+        endpoint before the guard existed; a slow endpoint must not start
+        failing them now.
+        """
+        client = DummyGuardedPreviewClient("timeout")
+        ctx = make_ctx(client)
+        captured: dict[str, Any] = {}
+        self._stub_preview_call(monkeypatch, captured)
+
+        with caplog.at_level("WARNING", logger="schwab_mcp.tools.orders"):
+            result = run(orders.preview_equity_order(ctx, account_hash, "AAPL", 100, "buy", "market"))
+
+        assert "preview_id" in result
+        assert len(client.instrument_requests) == 1
+        assert any("assetType pre-check skipped" in record.getMessage() for record in caplog.records)
+
+    def test_preview_passes_through_when_payload_is_malformed(self, monkeypatch, caplog, account_hash):
+        """A payload the resolver cannot parse disables the guard loudly, not silently."""
+        client = DummyGuardedPreviewClient("malformed")
+        ctx = make_ctx(client)
+        captured: dict[str, Any] = {}
+        self._stub_preview_call(monkeypatch, captured)
+
+        with caplog.at_level("WARNING", logger="schwab_mcp.tools.orders"):
+            result = run(orders.preview_equity_order(ctx, account_hash, "AAPL", 100, "buy", "market"))
+
+        assert "preview_id" in result
+        assert any("unexpected instruments payload" in record.getMessage() for record in caplog.records)
+
+    def test_preview_passes_through_when_lookup_returns_no_instruments(self, monkeypatch, caplog, account_hash):
+        """An empty `instruments` list means symbol not found: pass through quietly.
+
+        Unlike a malformed payload, this is a legitimate no-answer, so no
+        warning is logged.
+        """
         client = DummyGuardedPreviewClient(None)
         ctx = make_ctx(client)
+        captured: dict[str, Any] = {}
+        self._stub_preview_call(monkeypatch, captured)
 
-        async def fake_call(func, *args, **kwargs):
-            return {}
-
-        monkeypatch.setattr(orders, "call", fake_call)
-
-        result = run(orders.preview_equity_order(ctx, account_hash, "AAPL", 100, "buy", "market"))
+        with caplog.at_level("WARNING", logger="schwab_mcp.tools.orders"):
+            result = run(orders.preview_equity_order(ctx, account_hash, "AAPL", 100, "buy", "market"))
         assert "preview_id" in result
+        assert len(client.instrument_requests) == 1
+        assert not any("assetType pre-check skipped" in record.getMessage() for record in caplog.records)
 
-    def test_preview_option_order_skips_guard(self, monkeypatch, account_hash):
-        """OPTION legs are never subject to the equity assetType guard."""
+    def test_preview_option_order_makes_no_lookup(self, monkeypatch, account_hash):
+        """OPTION legs are never subject to the equity assetType guard.
+
+        Stronger than passing through: a pure option spec has no EQUITY legs,
+        so the guard must not call the instruments endpoint at all.
+        """
         client = DummyGuardedPreviewClient("MUTUAL_FUND")
         ctx = make_ctx(client)
-
-        async def fake_call(func, *args, **kwargs):
-            return {}
-
-        monkeypatch.setattr(orders, "call", fake_call)
+        captured: dict[str, Any] = {}
+        self._stub_preview_call(monkeypatch, captured)
 
         result = run(
             orders.preview_option_order(ctx, account_hash, "SPY   251219C00500000", 1, "BUY_TO_OPEN", "MARKET")
         )
         assert "preview_id" in result
+        assert client.instrument_requests == []
 
-    def test_place_previewed_order_rechecks_cached_spec(self, monkeypatch, account_hash):
-        """Defensive re-check: placement re-validates the cached spec before
-        requesting approval or hitting the API."""
+    def test_preview_replacement_order_rejects_mutual_fund_symbol(self, account_hash):
+        """Replacement previews run the same guard as every other preview path."""
         client = DummyGuardedPreviewClient("MUTUAL_FUND")
         ctx = make_ctx(client)
-        preview_id = ctx.previews.put(
-            account_hash,
-            {
-                "orderType": "MARKET",
-                "orderLegCollection": [
-                    {
-                        "instruction": "SELL",
-                        "quantity": 109,
-                        "instrument": {"symbol": "LENDX", "assetType": "EQUITY"},
-                    }
-                ],
-            },
-            "preview_equity_order",
-            "SELL 109 LENDX MARKET",
-            operation=orders.PreviewOperation.PLACE_ORDER,
-        )
-
-        approval_calls: list[Any] = []
-
-        async def fake_run_approval(ctx, request):
-            approval_calls.append(request)
-            raise AssertionError("approval must not be requested for a rejected spec")
-
-        async def fake_call(func, *args, **kwargs):
-            raise AssertionError("no API call may happen for a rejected spec")
-
-        monkeypatch.setattr(orders, "run_approval", fake_run_approval)
-        monkeypatch.setattr(orders, "call", fake_call)
 
         with pytest.raises(orders.UnsupportedAssetTypeError):
-            run(orders.place_previewed_order(ctx, account_hash, preview_id))
-        assert approval_calls == []
+            run(
+                orders.preview_replacement_order(
+                    ctx,
+                    account_hash,
+                    "123456",
+                    {
+                        "symbol": "LENDX",
+                        "quantity": 10,
+                        "instruction": "SELL",
+                        "order_type": "MARKET",
+                    },
+                )
+            )
+        assert client.captured is None
 
 
 class TestEquityLegSymbols:

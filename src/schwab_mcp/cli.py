@@ -12,6 +12,7 @@ from schwab.client import AsyncClient
 
 from schwab_mcp import auth as schwab_auth, tokens
 from schwab_mcp.approvals import (
+    ApprovalManager,
     DiscordApprovalManager,
     DiscordApprovalSettings,
     NoOpApprovalManager,
@@ -177,6 +178,88 @@ def auth(
         click.echo("  3. Callback URL was changed recently (wait until market close)")
         click.echo("  4. Browser blocked the popup or redirect")
         return 1
+
+
+def _select_write_mode(
+    *,
+    jesus_take_the_wheel: bool,
+    discord_token: str | None,
+    discord_channel_id: int | None,
+    approver_values: tuple[str, ...],
+    discord_timeout: int,
+    signal_api_url: str,
+    signal_account: str | None,
+    signal_approver: tuple[str, ...],
+    signal_timeout: int,
+    signal_account_name: tuple[str, ...],
+) -> tuple[ApprovalManager, bool] | None:
+    """Choose write access and its approval manager from resolved CLI values."""
+    if jesus_take_the_wheel:
+        return NoOpApprovalManager(), True
+
+    discord_requested = any((discord_token, discord_channel_id, approver_values))
+    signal_requested = any((signal_account, signal_approver))
+    if discord_requested and signal_requested:
+        send_error_response(
+            "Configure either Discord or Signal approvals, not both.",
+            code=400,
+            details={"discord": True, "signal": True},
+        )
+        return None
+    if signal_requested:
+        approver_numbers = SignalApprovalManager.authorized_numbers(signal_approver)
+        if not signal_account or not approver_numbers:
+            send_error_response(
+                "Signal approval configuration is required to enable write tools.",
+                code=400,
+                details={
+                    "missing_account": not bool(signal_account),
+                    "missing_approvers": not bool(approver_numbers),
+                },
+            )
+            return None
+        manager = SignalApprovalManager(
+            SignalApprovalSettings(
+                api_url=signal_api_url,
+                account=signal_account,
+                approver_numbers=approver_numbers,
+                timeout_seconds=float(signal_timeout),
+                account_names=SignalApprovalManager.parse_account_names(signal_account_name),
+            )
+        )
+        return manager, True
+    if not discord_requested:
+        return NoOpApprovalManager(), False
+
+    if not discord_token or not discord_channel_id:
+        send_error_response(
+            "Discord approval configuration is required to enable write tools.",
+            code=400,
+            details={
+                "missing_token": not bool(discord_token),
+                "missing_channel_id": not bool(discord_channel_id),
+            },
+        )
+        return None
+
+    approver_ids = DiscordApprovalManager.authorized_user_ids(
+        [int(value) for value in approver_values] if approver_values else None
+    )
+    if not approver_ids:
+        send_error_response(
+            "Discord approver list cannot be empty. Configure at least one reviewer.",
+            code=400,
+            details={"approver_source": "flags_or_env"},
+        )
+        return None
+
+    settings = DiscordApprovalSettings(
+        token=discord_token,
+        channel_id=discord_channel_id,
+        approver_ids=approver_ids,
+        timeout_seconds=float(discord_timeout),
+    )
+    return DiscordApprovalManager(settings), True
 
 
 @cli.command("server")
@@ -381,80 +464,21 @@ def server(
             if env_approvers:
                 approver_values = tuple(value.strip() for value in env_approvers.split(",") if value.strip())
 
-        discord_requested = any(
-            (
-                discord_token,
-                discord_channel_id,
-                approver_values,
-            )
+        write_mode = _select_write_mode(
+            jesus_take_the_wheel=jesus_take_the_wheel,
+            discord_token=discord_token,
+            discord_channel_id=discord_channel_id,
+            approver_values=approver_values,
+            discord_timeout=discord_timeout,
+            signal_api_url=signal_api_url,
+            signal_account=signal_account,
+            signal_approver=signal_approver,
+            signal_timeout=signal_timeout,
+            signal_account_name=signal_account_name,
         )
-        signal_requested = any((signal_account, signal_approver))
-        if discord_requested and signal_requested:
-            send_error_response(
-                "Configure either Discord or Signal approvals, not both.",
-                code=400,
-                details={"discord": True, "signal": True},
-            )
+        if write_mode is None:
             return 1
-        allow_write = False
-
-        if jesus_take_the_wheel:
-            approval_manager = NoOpApprovalManager()
-            allow_write = True
-        elif discord_requested:
-            if not discord_token or not discord_channel_id:
-                send_error_response(
-                    "Discord approval configuration is required to enable write tools.",
-                    code=400,
-                    details={
-                        "missing_token": not bool(discord_token),
-                        "missing_channel_id": not bool(discord_channel_id),
-                    },
-                )
-                return 1
-
-            approver_ids = DiscordApprovalManager.authorized_user_ids(
-                [int(value) for value in approver_values] if approver_values else None
-            )
-            if not approver_ids:
-                send_error_response(
-                    "Discord approver list cannot be empty. Configure at least one reviewer.",
-                    code=400,
-                    details={"approver_source": "flags_or_env"},
-                )
-                return 1
-            settings = DiscordApprovalSettings(
-                token=discord_token,
-                channel_id=discord_channel_id,
-                approver_ids=approver_ids,
-                timeout_seconds=float(discord_timeout),
-            )
-            approval_manager = DiscordApprovalManager(settings)
-            allow_write = True
-        elif signal_requested:
-            approver_numbers = SignalApprovalManager.authorized_numbers(signal_approver)
-            if not signal_account or not approver_numbers:
-                send_error_response(
-                    "Signal approval configuration is required to enable write tools.",
-                    code=400,
-                    details={
-                        "missing_account": not bool(signal_account),
-                        "missing_approvers": not bool(approver_numbers),
-                    },
-                )
-                return 1
-            approval_manager = SignalApprovalManager(
-                SignalApprovalSettings(
-                    api_url=signal_api_url,
-                    account=signal_account,
-                    approver_numbers=approver_numbers,
-                    timeout_seconds=float(signal_timeout),
-                    account_names=SignalApprovalManager.parse_account_names(signal_account_name),
-                )
-            )
-            allow_write = True
-        else:
-            approval_manager = NoOpApprovalManager()
+        approval_manager, allow_write = write_mode
 
         if jesus_take_the_wheel:
             click.echo(
