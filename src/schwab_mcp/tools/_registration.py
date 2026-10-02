@@ -26,6 +26,21 @@ _APPROVAL_PROGRESS_INTERVAL = 5.0
 _APPROVAL_WAIT_MESSAGE = "Waiting for reviewer approval…"
 _REDACTED_ARG_NAMES = frozenset({"account_hash"})
 
+# schwab-py formats these parameters straight into Schwab API URL paths
+# (e.g. '/trader/v1/accounts/{account_hash}/orders/{order_id}'). A crafted
+# value containing separators, fragments, or escapes can therefore reroute a
+# request to a different endpoint than the tool name implies: a hash of
+# 'HASH/orders/123#X' turns get_account into an order operation, and httpx
+# silently drops everything after '#'. Values are validated at the tool
+# boundary, before approval gating, so no tool, read or write, ever forwards
+# an unsafe value. Each entry maps a parameter name to a description of the
+# allowed form and its predicate.
+_PATH_PARAM_RULES: dict[str, tuple[str, Callable[[str], bool]]] = {
+    "account_hash": ("ASCII letters and digits", lambda v: bool(v) and v.isascii() and v.isalnum()),
+    "order_id": ("ASCII digits", lambda v: bool(v) and v.isascii() and v.isdigit()),
+    "transaction_id": ("ASCII letters and digits", lambda v: bool(v) and v.isascii() and v.isalnum()),
+}
+
 
 def _is_context_annotation(annotation: Any) -> bool:
     if annotation in (inspect._empty, None):
@@ -298,6 +313,50 @@ def _wrap_result_transform(func: ToolFn, transform: Callable[[Any], Any]) -> Too
     return cast(ToolFn, wrapper)
 
 
+def _wrap_with_path_param_validation(func: ToolFn) -> ToolFn:
+    """Reject unsafe values for path-bound parameters before anything else runs.
+
+    Applied outermost so an invalid value fails fast with a clear error and
+    never reaches the approval flow or schwab-py. ``None`` is skipped so
+    optional parameters (e.g. ``get_account``'s default-account fallback)
+    keep working.
+    """
+    signature = inspect.signature(func)
+    guarded = [name for name in signature.parameters if name in _PATH_PARAM_RULES]
+    if not guarded:
+        return func
+
+    @functools.wraps(func)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        bound = signature.bind_partial(*args, **kwargs)
+        for name in guarded:
+            value = bound.arguments.get(name)
+            if value is None:
+                continue
+            expected, is_valid = _PATH_PARAM_RULES[name]
+            if not (isinstance(value, str) and is_valid(value)):
+                raise ValueError(
+                    f"{name} must be a non-empty string of {expected}, got {value!r}. "
+                    f"This value is placed in the Schwab API request path verbatim, "
+                    f"so anything else could redirect the request to a different "
+                    f"endpoint than '{func.__name__}' implies."
+                )
+        result = func(*bound.args, **bound.kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    wrapper_globals = cast(dict[str, Any], getattr(wrapper, "__globals__", {}))
+    module = inspect.getmodule(func)
+    if module is not None:
+        module_globals = vars(module)
+        if wrapper_globals is not module_globals:
+            for key, value in module_globals.items():
+                wrapper_globals.setdefault(key, value)
+
+    return wrapper
+
+
 def register_tool(
     server: MCPServer,
     func: ToolFn,
@@ -312,6 +371,7 @@ def register_tool(
         func = _wrap_with_approval(func)
     if result_transform is not None:
         func = _wrap_result_transform(func, result_transform)
+    func = _wrap_with_path_param_validation(func)
 
     tool_annotations = annotations
     if tool_annotations is None:

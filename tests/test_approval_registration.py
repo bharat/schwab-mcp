@@ -16,8 +16,8 @@ from schwab_mcp.context import SchwabServerContext
 from schwab_mcp.tools import orders
 from schwab_mcp.tools._registration import register_tool
 
-ACCOUNT_HASH = "account-hash-42"
-ORDER_ID = "order-987"
+ACCOUNT_HASH = "0123456789ABCDEF5842"
+ORDER_ID = "1006299986987"
 
 
 class FixedApprovalManager(ApprovalManager):
