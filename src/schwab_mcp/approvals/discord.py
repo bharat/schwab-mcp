@@ -18,10 +18,6 @@ from schwab_mcp.approvals.base import (
 
 logger = logging.getLogger(__name__)
 
-# Discord embed field values are capped at 1024 chars; stay a little under so
-# the surrounding code-fence markers always fit.
-_ARGUMENTS_FIELD_LIMIT = 1000
-
 
 @dataclass(slots=True, frozen=True)
 class DiscordApprovalSettings:
@@ -49,9 +45,7 @@ class _ApprovalClient(discord.Client):
     async def on_ready(self) -> None:  # pragma: no cover - thin delegation
         await self._manager._handle_ready()
 
-    async def on_reaction_add(  # pragma: no cover - thin delegation
-        self, reaction: discord.Reaction, user: discord.User | discord.Member
-    ) -> None:
+    async def on_reaction_add(self, reaction: discord.Reaction, user: discord.User | discord.Member) -> None:
         await self._manager._handle_reaction_add(reaction, user)
 
 
@@ -106,36 +100,29 @@ class DiscordApprovalManager(ApprovalManager):
 
     async def require(self, request: ApprovalRequest) -> ApprovalDecision:
         """Post an approval request to Discord and wait for a reaction."""
+        try:
+            embed = self._build_pending_embed(request)
+        except ValueError:
+            logger.warning("Approval request %s exceeds Discord embed limits", request.id)
+            try:
+                await self.start()
+                channel = await self._ensure_channel()
+                await channel.send(
+                    content=(
+                        f"❌ schwab-mcp auto-denied '{request.tool_name}' "
+                        f"(approval {request.id}): arguments exceed Discord's "
+                        "1024-character display limit. Approving a partial "
+                        "view is unsafe."
+                    )
+                )
+            except discord.HTTPException:
+                logger.exception("Failed to post Discord auto-denial notice for request %s", request.id)
+            return ApprovalDecision.DENIED
+
         await self.start()
         channel = await self._ensure_channel()
 
-        rendered_args = self._format_arguments(request.arguments)
-        if len(rendered_args) > _ARGUMENTS_FIELD_LIMIT:
-            logger.warning(
-                "Auto-denying approval %s for tool '%s': arguments too large to display in full (%d chars)",
-                request.id,
-                request.tool_name,
-                len(rendered_args),
-            )
-            embed = discord.Embed(
-                title="Write operation auto-denied",
-                description=(
-                    f"Tool `{request.tool_name}` was denied automatically: its "
-                    f"arguments are too large to display in full "
-                    f"({len(rendered_args)} chars). Approving a partial view "
-                    "is unsafe."
-                ),
-                colour=discord.Colour.red(),
-            )
-            embed.add_field(name="Request ID", value=request.request_id, inline=False)
-            embed.add_field(name="Approval ID", value=request.id, inline=False)
-            try:
-                await channel.send(embed=embed)
-            except discord.HTTPException:
-                logger.exception("Failed to post auto-deny notice for request %s", request.id)
-            return ApprovalDecision.DENIED
-
-        message = await channel.send(embed=self._build_pending_embed(request, rendered_args))
+        message = await channel.send(embed=embed)
         try:
             await message.add_reaction("✅")
             await message.add_reaction("❌")
@@ -204,7 +191,7 @@ class DiscordApprovalManager(ApprovalManager):
         if emoji not in {"✅", "❌"}:
             return
 
-        if self._settings.approver_ids and user.id not in self._settings.approver_ids:
+        if user.id not in self._settings.approver_ids:
             logger.debug(
                 "Ignoring reaction %s from unauthorized user %s for request %s",
                 emoji,
@@ -222,6 +209,7 @@ class DiscordApprovalManager(ApprovalManager):
         if pending.future.done():
             return
 
+        pending.future.set_result(decision)
         await self._finalize_message(
             pending.message,
             pending.request,
@@ -229,7 +217,6 @@ class DiscordApprovalManager(ApprovalManager):
             actor=user,
             reason=f"Decision recorded via {emoji}",
         )
-        pending.future.set_result(decision)
 
     async def _ensure_channel(self) -> discord.abc.MessageableChannel:
         await self._ready.wait()
@@ -249,7 +236,7 @@ class DiscordApprovalManager(ApprovalManager):
         self._channel = channel
         return channel
 
-    def _build_pending_embed(self, request: ApprovalRequest, rendered_args: str) -> discord.Embed:
+    def _build_pending_embed(self, request: ApprovalRequest) -> discord.Embed:
         embed = discord.Embed(
             title="Write operation requires approval",
             description=f"Tool `{request.tool_name}` requested write access.",
@@ -260,7 +247,11 @@ class DiscordApprovalManager(ApprovalManager):
         if request.client_id:
             embed.add_field(name="Client ID", value=request.client_id, inline=False)
         if request.arguments:
-            embed.add_field(name="Arguments", value=rendered_args, inline=False)
+            embed.add_field(
+                name="Arguments",
+                value=self._format_arguments(request.arguments),
+                inline=False,
+            )
         embed.set_footer(text="React with ✅ to approve or ❌ to deny.")
         return embed
 
@@ -282,6 +273,10 @@ class DiscordApprovalManager(ApprovalManager):
         embed.add_field(name="Approval ID", value=request.id, inline=False)
         if request.client_id:
             embed.add_field(name="Client ID", value=request.client_id, inline=False)
+        # Unlike upstream, the finalized embed deliberately omits the
+        # Arguments field: reviewers saw the full arguments on the pending
+        # embed, and the decided message should not keep an argument dump in
+        # the channel history.
         if actor is not None:
             embed.add_field(name="Actor", value=f"{actor} (ID: {actor.id})", inline=False)
         if reason:
@@ -293,7 +288,10 @@ class DiscordApprovalManager(ApprovalManager):
 
     @staticmethod
     def _format_arguments(arguments: Mapping[str, str]) -> str:
-        return format_arguments(arguments)
+        rendered = discord.utils.escape_mentions(format_arguments(arguments))
+        if len(rendered) > 1024:
+            raise ValueError("Discord argument field exceeds the 1024-character limit")
+        return rendered
 
     @staticmethod
     def _colour_for_decision(decision: ApprovalDecision) -> discord.Colour:

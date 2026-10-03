@@ -1,8 +1,12 @@
 import asyncio
+import json
 from collections.abc import Awaitable
 from typing import Any, TypeVar
 
+import httpx
 import pytest
+import websockets
+import websockets.exceptions
 
 from schwab_mcp.approvals import (
     ApprovalDecision,
@@ -11,8 +15,13 @@ from schwab_mcp.approvals import (
     SignalApprovalSettings,
     signal as signal_mod,
 )
+from schwab_mcp.tools._registration import _format_argument, _redact
 
 T = TypeVar("T")
+
+_BOT_ACCOUNT = "+15555550100"
+_APPROVER = "+15555550199"
+_FULL_HASH = "0123456789ABCDEF5805"
 
 
 def await_result(awaitable: Awaitable[T]) -> T:
@@ -20,6 +29,29 @@ def await_result(awaitable: Awaitable[T]) -> T:
         return await awaitable
 
     return asyncio.run(_runner())
+
+
+def _cancel_args(order_id: str = "1006299986057", account_hash: str = _FULL_HASH) -> dict[str, str]:
+    """Arguments exactly as the auto-wrap in tools/_registration.py produces
+    them: each value JSON-encoded by `_format_argument`, with account_hash
+    redacted to its last four characters first."""
+    return {
+        "order_id": _format_argument(order_id),
+        "account_hash": _format_argument(_redact("account_hash", account_hash)),
+    }
+
+
+def _previewed_args(**overrides: str) -> dict[str, str]:
+    """Arguments exactly as place_previewed_order in tools/orders.py builds
+    them: plain strings, no encoding, full account hash."""
+    base = {
+        "original_tool": "preview_equity_order",
+        "order_summary": "BUY 5 XYZ LIMIT @ 12.34",
+        "preview_id": "pv-1",
+        "account_hash": _FULL_HASH,
+    }
+    base.update(overrides)
+    return base
 
 
 def _make_manager(
@@ -42,9 +74,10 @@ def _make_manager(
     manager = SignalApprovalManager(
         SignalApprovalSettings(
             api_url="http://127.0.0.1:8080",
-            account="+15555550100",
-            approver_numbers=frozenset({"+15555550199"}),
+            account=_BOT_ACCOUNT,
+            approver_numbers=frozenset({_APPROVER}),
             timeout_seconds=timeout_seconds,
+            agent_name="Claude Trader",
         )
     )
     return manager, sent
@@ -53,22 +86,39 @@ def _make_manager(
 def _request(**overrides: Any) -> ApprovalRequest:
     base: dict[str, Any] = {
         "id": "appr-1",
-        "tool_name": "place_equity_order",
+        "tool_name": "cancel_order",
         "request_id": "req-1",
         "client_id": None,
-        "arguments": {"symbol": '"NVDA"', "quantity": "50"},
+        "arguments": _cancel_args(),
     }
     base.update(overrides)
     return ApprovalRequest(**base)
 
 
-def _reply(quoted_ts: int, text: str, *, source: str = "+15555550199") -> dict[str, Any]:
+def _reply(
+    quoted_ts: int,
+    text: str,
+    *,
+    source: str = _APPROVER,
+    quote_author: str = _BOT_ACCOUNT,
+) -> dict[str, Any]:
     return {
         "envelope": {
             "sourceNumber": source,
-            "dataMessage": {"message": text, "quote": {"id": quoted_ts}},
+            "dataMessage": {
+                "message": text,
+                "quote": {"id": quoted_ts, "authorNumber": quote_author},
+            },
         }
     }
+
+
+def test_require_websockets_exposes_exceptions() -> None:
+    """websockets>=14 doesn't expose .exceptions as a lazy top-level attribute;
+    the helper must import the submodule so the receive loop's except clause
+    can reference it on the returned module."""
+    module = signal_mod._require_websockets()
+    assert module.exceptions.InvalidHandshake is websockets.exceptions.InvalidHandshake
 
 
 def test_signal_manager_requires_approvers() -> None:
@@ -76,7 +126,7 @@ def test_signal_manager_requires_approvers() -> None:
         SignalApprovalManager(
             SignalApprovalSettings(
                 api_url="http://127.0.0.1:8080",
-                account="+15555550100",
+                account=_BOT_ACCOUNT,
                 approver_numbers=frozenset(),
             )
         )
@@ -90,7 +140,10 @@ def test_require_approves_on_ok_reply(monkeypatch: pytest.MonkeyPatch) -> None:
         await asyncio.sleep(0)
         (sent_ts,) = list(manager._pending)
         await manager._handle_envelope(_reply(sent_ts, "ok"))
-        return await task
+        decision = await task
+        # The decision notice is sent from a background task.
+        await asyncio.gather(*manager._notices)
+        return decision
 
     decision = await_result(scenario())
 
@@ -112,8 +165,13 @@ def test_require_approves_on_sync_message_reply(
         await manager._handle_envelope(
             {
                 "envelope": {
-                    "sourceNumber": "+15555550199",
-                    "syncMessage": {"sentMessage": {"message": "ok", "quote": {"id": sent_ts}}},
+                    "sourceNumber": _APPROVER,
+                    "syncMessage": {
+                        "sentMessage": {
+                            "message": "ok",
+                            "quote": {"id": sent_ts, "authorNumber": _BOT_ACCOUNT},
+                        }
+                    },
                 }
             }
         )
@@ -130,10 +188,38 @@ def test_require_denies_on_no_reply(monkeypatch: pytest.MonkeyPatch) -> None:
         await asyncio.sleep(0)
         (sent_ts,) = list(manager._pending)
         await manager._handle_envelope(_reply(sent_ts, "NO"))
-        return await task
+        decision = await task
+        await asyncio.gather(*manager._notices)
+        return decision
 
     assert await_result(scenario()) is ApprovalDecision.DENIED
     assert "denied" in sent[-1]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("👍", ApprovalDecision.APPROVED),
+        ("✅", ApprovalDecision.APPROVED),
+        ("👎", ApprovalDecision.DENIED),
+        ("❌", ApprovalDecision.DENIED),
+    ],
+)
+def test_emoji_synonyms_resolve_decisions(
+    monkeypatch: pytest.MonkeyPatch, text: str, expected: ApprovalDecision
+) -> None:
+    manager, _ = _make_manager(monkeypatch)
+
+    async def scenario() -> ApprovalDecision:
+        task = asyncio.create_task(manager.require(_request()))
+        await asyncio.sleep(0)
+        (sent_ts,) = list(manager._pending)
+        await manager._handle_envelope(_reply(sent_ts, text))
+        decision = await task
+        await asyncio.gather(*manager._notices)
+        return decision
+
+    assert await_result(scenario()) is expected
 
 
 def test_unauthorized_number_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,6 +230,21 @@ def test_unauthorized_number_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None
         await asyncio.sleep(0)
         (sent_ts,) = list(manager._pending)
         await manager._handle_envelope(_reply(sent_ts, "ok", source="+19998887777"))
+        return await task
+
+    assert await_result(scenario()) is ApprovalDecision.EXPIRED
+
+
+def test_reply_quoting_other_author_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reply quoting someone else's message must not resolve an approval,
+    even if its quote.id collides with one of our send timestamps."""
+    manager, _ = _make_manager(monkeypatch, timeout_seconds=0.05)
+
+    async def scenario() -> ApprovalDecision:
+        task = asyncio.create_task(manager.require(_request()))
+        await asyncio.sleep(0)
+        (sent_ts,) = list(manager._pending)
+        await manager._handle_envelope(_reply(sent_ts, "ok", quote_author="+19998887777"))
         return await task
 
     assert await_result(scenario()) is ApprovalDecision.EXPIRED
@@ -171,7 +272,7 @@ def test_reply_without_quote_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None
         await manager._handle_envelope(
             {
                 "envelope": {
-                    "sourceNumber": "+15555550199",
+                    "sourceNumber": _APPROVER,
                     "dataMessage": {"message": "ok"},
                 }
             }
@@ -179,6 +280,45 @@ def test_reply_without_quote_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None
         return await task
 
     assert await_result(scenario()) is ApprovalDecision.EXPIRED
+
+
+def test_duplicate_send_timestamp_denies_both_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reused send timestamp cannot be correlated safely; both colliding
+    approvals are denied."""
+    sent: list[str] = []
+
+    async def fake_send(self: SignalApprovalManager, body: str) -> int:
+        sent.append(body)
+        return 1000
+
+    async def fake_start(self: SignalApprovalManager) -> None:
+        return None
+
+    monkeypatch.setattr(SignalApprovalManager, "_send", fake_send)
+    monkeypatch.setattr(SignalApprovalManager, "start", fake_start)
+    manager = SignalApprovalManager(
+        SignalApprovalSettings(
+            api_url="http://127.0.0.1:8080",
+            account=_BOT_ACCOUNT,
+            approver_numbers=frozenset({_APPROVER}),
+        )
+    )
+
+    async def scenario() -> tuple[ApprovalDecision, ApprovalDecision]:
+        first = asyncio.create_task(manager.require(_request()))
+        await asyncio.sleep(0)
+        second = await manager.require(_request(id="appr-2"))
+        return await first, second
+
+    first, second = await_result(scenario())
+    # Both prompts share one correlation key, so a reply quoting either is
+    # ambiguous; both requests must die.
+    assert first is ApprovalDecision.DENIED
+    assert second is ApprovalDecision.DENIED
+    assert any("duplicate" in body.lower() for body in sent)
+    assert manager._pending == {}
 
 
 def test_require_auto_denies_when_body_overflows(
@@ -216,105 +356,81 @@ def test_timeout_returns_expired(monkeypatch: pytest.MonkeyPatch) -> None:
 def _settings(**overrides: Any) -> SignalApprovalSettings:
     base: dict[str, Any] = {
         "api_url": "http://127.0.0.1:8080",
-        "account": "+15555550100",
-        "approver_numbers": frozenset({"+15555550199"}),
+        "account": _BOT_ACCOUNT,
+        "approver_numbers": frozenset({_APPROVER}),
+        "agent_name": "Claude Trader",
     }
     base.update(overrides)
     return SignalApprovalSettings(**base)
 
 
-def _equity_args(**overrides: Any) -> dict[str, str]:
-    """Build a JSON-encoded place_equity_order arguments dict, matching the
-    shape produced by `_format_argument` in tools/_registration.py."""
-    base: dict[str, Any] = {
-        "account_hash": "…5805",
-        "symbol": "SCHP",
-        "quantity": 1,
-        "instruction": "BUY",
-        "order_type": "MARKET",
-        "session": "NORMAL",
-        "duration": "DAY",
-    }
-    base.update(overrides)
-    import json as _json
-
-    return {k: _json.dumps(v) for k, v in base.items()}
+# --------------------------------------------------------------------------- #
+# Renderers, driven by the argument shapes production actually produces
+# --------------------------------------------------------------------------- #
 
 
-def test_render_body_friendly_format_for_place_equity_order_with_account_name() -> None:
+def test_render_body_cancel_order_with_account_name() -> None:
     manager = SignalApprovalManager(_settings(account_names={"5805": "Rollover IRA"}))
-    body = manager._render_body(_request(arguments=_equity_args()))
-
-    assert (
-        body == "Claude Trader wants to buy 1 SCHP in the Rollover IRA account. "
-        '(Market, Day)\n\nReply "ok" to approve or "no" to deny.'
-    )
-
-
-def test_render_body_falls_back_to_account_last4_when_unmapped() -> None:
-    manager = SignalApprovalManager(_settings())
-    body = manager._render_body(_request(arguments=_equity_args()))
-
-    assert "in account …5805" in body
-    assert "Claude Trader wants to buy" in body
-
-
-def test_render_body_renders_limit_with_price() -> None:
-    manager = SignalApprovalManager(_settings(account_names={"5805": "Rollover IRA"}))
-    body = manager._render_body(
-        _request(
-            arguments=_equity_args(
-                instruction="SELL",
-                quantity=200,
-                symbol="ULTY",
-                order_type="LIMIT",
-                price=12.34,
-                duration="GOOD_TILL_CANCEL",
-            )
-        )
-    )
-
-    assert "sell 200 ULTY" in body
-    assert "Limit @ $12.34" in body
-    assert "GTC" in body
-
-
-def test_render_body_renders_stop_limit_with_both_prices() -> None:
-    manager = SignalApprovalManager(_settings())
-    body = manager._render_body(
-        _request(
-            arguments=_equity_args(
-                order_type="STOP_LIMIT",
-                stop_price=25.00,
-                price=24.50,
-            )
-        )
-    )
-
-    assert "Stop $25.00 → Limit $24.50" in body
-
-
-def test_render_body_includes_non_normal_session() -> None:
-    manager = SignalApprovalManager(_settings())
-    body = manager._render_body(_request(arguments=_equity_args(session="AM")))
-    assert "session: Am" in body
-
-
-def test_render_body_renders_cancel_order() -> None:
-    import json as _json
-
-    manager = SignalApprovalManager(_settings(account_names={"5805": "Rollover IRA"}))
-    body = manager._render_body(
-        _request(
-            tool_name="cancel_order",
-            arguments={
-                "account_hash": _json.dumps("…5805"),
-                "order_id": _json.dumps("1006299986057"),
-            },
-        )
-    )
+    body = manager._render_body(_request(tool_name="cancel_order", arguments=_cancel_args()))
 
     assert "Claude Trader wants to cancel order 1006299986057 in the Rollover IRA account." in body
+    assert _FULL_HASH not in body
+
+
+def test_render_body_cancel_order_falls_back_to_last4_when_unmapped() -> None:
+    manager = SignalApprovalManager(_settings())
+    body = manager._render_body(_request(tool_name="cancel_order", arguments=_cancel_args()))
+
+    assert "in account …5805" in body
+    assert _FULL_HASH not in body
+
+
+def test_render_body_place_previewed_order_with_account_name() -> None:
+    manager = SignalApprovalManager(_settings(account_names={"5805": "Rollover IRA"}))
+    body = manager._render_body(_request(tool_name="place_previewed_order", arguments=_previewed_args()))
+
+    assert (
+        "Claude Trader wants to place a previewed order in the Rollover IRA account: "
+        "BUY 5 XYZ LIMIT @ 12.34 (previewed via preview_equity_order)." in body
+    )
+    assert _FULL_HASH not in body
+
+
+def test_render_body_place_previewed_order_falls_back_to_last4() -> None:
+    manager = SignalApprovalManager(_settings())
+    body = manager._render_body(_request(tool_name="place_previewed_order", arguments=_previewed_args()))
+
+    assert "in account …5805" in body
+    assert _FULL_HASH not in body
+
+
+def test_render_body_rejects_crafted_account_hash() -> None:
+    """A path-injection account_hash must not be summarized: the last-4
+    suffix would present a request targeting a different account and order
+    as the legitimate one. The verbose dump shows the raw value instead.
+    (The tool boundary in _registration rejects these before any approval
+    runs; this renderer check is the second line of defense for requests
+    built outside the auto-wrap.)"""
+    manager = SignalApprovalManager(_settings(account_names={"5805": "Rollover IRA"}))
+    crafted = "0123456789ABCDEF9999/orders/999000111#5805"
+    body = manager._render_body(
+        _request(tool_name="place_previewed_order", arguments=_previewed_args(account_hash=crafted))
+    )
+
+    assert "wants to call: place_previewed_order" in body  # verbose fallback, not the summary
+    assert crafted in body  # reviewer sees the raw injected value
+    assert "Rollover IRA" not in body
+
+
+def test_render_body_rejects_non_digit_order_id() -> None:
+    """An order_id carrying escaped control characters (e.g. a bidi override)
+    must fall back to the verbose dump, which shows the JSON-escaped form."""
+    manager = SignalApprovalManager(_settings())
+    body = manager._render_body(_request(tool_name="cancel_order", arguments=_cancel_args(order_id="123\u202e456")))
+
+    assert "wants to call: cancel_order" in body
+    assert "\\u202e" in body  # escaped, as json.dumps produced it
+    assert "\u202e" not in body  # the raw override never reaches the message
 
 
 def test_render_body_falls_back_to_verbose_for_unknown_tool() -> None:
@@ -322,7 +438,7 @@ def test_render_body_falls_back_to_verbose_for_unknown_tool() -> None:
     body = manager._render_body(
         _request(
             tool_name="place_option_combo_order",
-            arguments={"legs": '["a","b"]'},
+            arguments={"legs": '["a", "b"]'},
         )
     )
 
@@ -340,11 +456,11 @@ def test_render_body_recovers_from_renderer_exception(
     def boom(args: Any, account_names: Any) -> str:
         raise RuntimeError("intentional")
 
-    monkeypatch.setitem(signal_mod._TOOL_RENDERERS, "place_equity_order", boom)
+    monkeypatch.setitem(signal_mod._TOOL_RENDERERS, "cancel_order", boom)
     manager = SignalApprovalManager(_settings())
-    body = manager._render_body(_request(arguments=_equity_args()))
+    body = manager._render_body(_request(tool_name="cancel_order", arguments=_cancel_args()))
 
-    assert "Claude Trader wants to call: place_equity_order" in body
+    assert "Claude Trader wants to call: cancel_order" in body
 
 
 def test_parse_account_names_handles_comma_split_and_repeats() -> None:
@@ -363,3 +479,197 @@ def test_authorized_numbers_normalizes() -> None:
     out = SignalApprovalManager.authorized_numbers([" +15555550199 ", "", "+1555"])
     assert out == frozenset({"+15555550199", "+1555"})
     assert SignalApprovalManager.authorized_numbers(None) == frozenset()
+
+
+def test_agent_name_defaults_to_schwab_mcp() -> None:
+    """The actor named in approval messages comes from settings; the default
+    stays neutral so only configured deployments brand the prompt."""
+    manager = SignalApprovalManager(_settings(agent_name="schwab-mcp"))
+    body = manager._render_body(_request(tool_name="unknown_tool"))
+    assert body.startswith("schwab-mcp wants to call: unknown_tool")
+
+
+# --------------------------------------------------------------------------- #
+# HTTP transport and websocket receive loop
+# --------------------------------------------------------------------------- #
+
+
+async def _noop_receive_loop(self: SignalApprovalManager) -> None:
+    return None
+
+
+def _mock_transport(captured: dict[str, Any], timestamp: int = 1727) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["json"] = json.loads(request.content)
+        return httpx.Response(201, json={"timestamp": timestamp})
+
+    return httpx.MockTransport(handler)
+
+
+def _patch_client_transport(monkeypatch: pytest.MonkeyPatch, transport: httpx.MockTransport) -> None:
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        signal_mod.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=transport, **kwargs),
+    )
+
+
+def test_send_posts_v2_send_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    _patch_client_transport(monkeypatch, _mock_transport(captured))
+    monkeypatch.setattr(SignalApprovalManager, "_receive_loop", _noop_receive_loop)
+    manager = SignalApprovalManager(_settings(approver_numbers=frozenset({"+15555550199", "+15555550198"})))
+
+    async def scenario() -> int:
+        await manager.start()
+        ts = await manager._send("hello reviewers")
+        await manager.stop()
+        return ts
+
+    ts = await_result(scenario())
+
+    assert ts == 1727
+    assert captured["url"].endswith("/v2/send")
+    assert captured["json"] == {
+        "number": _BOT_ACCOUNT,
+        "recipients": ["+15555550198", "+15555550199"],
+        "message": "hello reviewers",
+        "text_mode": "normal",
+    }
+
+
+def test_send_before_start_raises() -> None:
+    manager = SignalApprovalManager(_settings())
+    with pytest.raises(RuntimeError, match="start"):
+        await_result(manager._send("too early"))
+
+
+def test_manager_is_restartable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """start() → stop() → start() must yield a usable client again."""
+    captured: dict[str, Any] = {}
+    _patch_client_transport(monkeypatch, _mock_transport(captured))
+    monkeypatch.setattr(SignalApprovalManager, "_receive_loop", _noop_receive_loop)
+    manager = SignalApprovalManager(_settings())
+
+    async def scenario() -> int:
+        await manager.start()
+        await manager.stop()
+        await manager.start()
+        ts = await manager._send("after restart")
+        await manager.stop()
+        return ts
+
+    assert await_result(scenario()) == 1727
+
+
+class _FakeWebsocket:
+    def __init__(self, manager: SignalApprovalManager, frames: list[str]) -> None:
+        self._manager = manager
+        self._frames = frames
+
+    async def __aenter__(self) -> "_FakeWebsocket":
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> bool:
+        return False
+
+    def __aiter__(self) -> "_FakeWebsocket":
+        return self
+
+    async def __anext__(self) -> str:
+        # Wait until require() has registered the pending approval, then
+        # deliver the reply; afterwards park forever like an idle socket.
+        while not self._manager._pending:
+            await asyncio.sleep(0)
+        if self._frames:
+            return self._frames.pop(0)
+        await asyncio.Event().wait()
+        raise StopAsyncIteration
+
+
+class _FakeWebsockets:
+    exceptions = websockets.exceptions
+
+    def __init__(self, manager: SignalApprovalManager, frames: list[str]) -> None:
+        self._manager = manager
+        self._frames = frames
+        self.connected_urls: list[str] = []
+
+    def connect(self, url: str) -> _FakeWebsocket:
+        self.connected_urls.append(url)
+        return _FakeWebsocket(self._manager, self._frames)
+
+
+def test_receive_loop_resolves_approval_from_websocket_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end through the real start()/require()/_receive_loop wiring:
+    a reply frame on the websocket approves the pending request."""
+    captured: dict[str, Any] = {}
+    _patch_client_transport(monkeypatch, _mock_transport(captured, timestamp=4242))
+    manager = SignalApprovalManager(_settings(timeout_seconds=5.0))
+    fake_ws = _FakeWebsockets(manager, [json.dumps(_reply(4242, "ok"))])
+    monkeypatch.setattr(signal_mod, "_require_websockets", lambda: fake_ws)
+
+    async def scenario() -> ApprovalDecision:
+        decision = await manager.require(_request())
+        await manager.stop()
+        return decision
+
+    decision = await_result(scenario())
+
+    assert decision is ApprovalDecision.APPROVED
+    assert fake_ws.connected_urls == [f"ws://127.0.0.1:8080/v1/receive/{_BOT_ACCOUNT}"]
+
+
+def test_receive_url_strips_trailing_slash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A trailing slash on --signal-api-url must not produce //v1/receive,
+    which would 404 on every handshake and read as a daemon-mode problem."""
+    captured: dict[str, Any] = {}
+    _patch_client_transport(monkeypatch, _mock_transport(captured, timestamp=4242))
+    manager = SignalApprovalManager(_settings(api_url="http://127.0.0.1:8080/", timeout_seconds=5.0))
+    fake_ws = _FakeWebsockets(manager, [json.dumps(_reply(4242, "ok"))])
+    monkeypatch.setattr(signal_mod, "_require_websockets", lambda: fake_ws)
+
+    async def scenario() -> ApprovalDecision:
+        decision = await manager.require(_request())
+        await manager.stop()
+        return decision
+
+    assert await_result(scenario()) is ApprovalDecision.APPROVED
+    assert fake_ws.connected_urls == [f"ws://127.0.0.1:8080/v1/receive/{_BOT_ACCOUNT}"]
+
+
+def test_receive_loop_logs_misconfigured_daemon_mode(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed websocket handshake (daemon not in json-rpc mode, or a bad
+    URL) logs a specific misconfiguration error instead of a generic
+    reconnect line."""
+
+    class _RefusingWebsockets:
+        exceptions = websockets.exceptions
+
+        def connect(self, url: str) -> Any:
+            raise websockets.exceptions.InvalidMessage("did not receive a valid HTTP response")
+
+    monkeypatch.setattr(signal_mod, "_require_websockets", lambda: _RefusingWebsockets())
+    monkeypatch.setattr(signal_mod, "_MISCONFIG_RETRY_SECONDS", 0.01)
+    manager = SignalApprovalManager(_settings())
+
+    async def scenario() -> None:
+        task = asyncio.create_task(manager._receive_loop())
+        for _ in range(200):
+            if any("MODE=json-rpc" in record.getMessage() for record in caplog.records):
+                break
+            await asyncio.sleep(0.005)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    with caplog.at_level("ERROR"):
+        await_result(scenario())
+
+    assert any("MODE=json-rpc" in record.getMessage() for record in caplog.records)
