@@ -21,6 +21,11 @@ dependencies = [
     "websockets>=14.0",
 ]
 
+[project.optional-dependencies]
+# Signal approvals talk to a local signal-cli REST daemon over HTTP (httpx,
+# already a core dependency) and listen for replies on its websocket.
+signal = ["websockets>=14.0"]
+
 [project.scripts]
 schwab-mcp = "schwab_mcp:main"
 
@@ -31,6 +36,9 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "mcp[cli]>=2.0.0,<3",
+    # Mirrors the "signal" extra so the Signal approval tests run in CI.
+    "websockets>=14.0",
+    "mutmut>=3.8.0",
     "pyright>=1.1.407",
     "pytest>=8.4.2",
     "pytest-cov>=6.0.0",
@@ -47,6 +55,11 @@ ta = [
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "--cov=schwab_mcp --cov-report=term-missing"
+
+[tool.mutmut]
+source_paths = ["src/schwab_mcp"]
+pytest_add_cli_args = ["-o", "addopts="]
+pytest_add_cli_args_test_selection = ["tests/"]
 
 [tool.coverage.run]
 source = ["src/schwab_mcp"]

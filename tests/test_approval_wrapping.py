@@ -82,13 +82,15 @@ def make_ctx(
     return ctx, approval_manager, session, request_context
 
 
-async def sample_write_tool(ctx: SchwabContext, symbol: str) -> str:
-    return symbol.upper()
-
-
 def wrapped_tool():
+    calls: list[str] = []
+
+    async def sample_write_tool(ctx: SchwabContext, symbol: str) -> str:
+        calls.append(symbol)
+        return symbol.upper()
+
     ensured = _registration._ensure_schwab_context(sample_write_tool)
-    return _registration._wrap_with_approval(ensured)
+    return _registration._wrap_with_approval(ensured), calls
 
 
 T = TypeVar("T")
@@ -103,11 +105,12 @@ def await_result(awaitable: Awaitable[T]) -> T:
 
 def test_write_tool_runs_when_approved() -> None:
     ctx, approval_manager, session, _ = make_ctx(ApprovalDecision.APPROVED)
-    tool = wrapped_tool()
+    tool, calls = wrapped_tool()
 
     result = await_result(tool(ctx, "spy"))
 
     assert result == "SPY"
+    assert calls == ["spy"]
     assert len(approval_manager.requests) == 1
     request = approval_manager.requests[0]
     assert request.tool_name == "sample_write_tool"
@@ -118,11 +121,12 @@ def test_write_tool_runs_when_approved() -> None:
 def test_write_tool_denied_raises_permission_error(caplog: pytest.LogCaptureFixture) -> None:
     """Log the denial message and raise a permission error."""
     ctx, approval_manager, session, _ = make_ctx(ApprovalDecision.DENIED)
-    tool = wrapped_tool()
+    tool, calls = wrapped_tool()
 
     with pytest.raises(PermissionError):
         await_result(tool(ctx, "spy"))
 
+    assert calls == []
     assert len(approval_manager.requests) == 1
     assert session.messages == []
     assert [record.getMessage() for record in caplog.records] == [
@@ -133,11 +137,12 @@ def test_write_tool_denied_raises_permission_error(caplog: pytest.LogCaptureFixt
 def test_write_tool_timeout_raises_timeout_error(caplog: pytest.LogCaptureFixture) -> None:
     """Log the expiration message and raise a timeout error."""
     ctx, approval_manager, session, _ = make_ctx(ApprovalDecision.EXPIRED)
-    tool = wrapped_tool()
+    tool, calls = wrapped_tool()
 
     with pytest.raises(TimeoutError):
         await_result(tool(ctx, "spy"))
 
+    assert calls == []
     assert len(approval_manager.requests) == 1
     assert session.messages == []
     assert [record.getMessage() for record in caplog.records] == [
@@ -151,7 +156,7 @@ def test_write_tool_accepts_base_context() -> None:
         _request_context=cast(Any, request_context),
         _mcp_server=None,
     )
-    tool = wrapped_tool()
+    tool, _ = wrapped_tool()
 
     result = await_result(tool(base_ctx, "spy"))
 
@@ -162,7 +167,7 @@ def test_write_tool_accepts_base_context() -> None:
 
 def test_progress_notifications_emitted_when_supported() -> None:
     ctx, approval_manager, session, _ = make_ctx(ApprovalDecision.APPROVED, progress_token="token-1")
-    tool = wrapped_tool()
+    tool, _ = wrapped_tool()
 
     result = await_result(tool(ctx, "spy"))
 
@@ -256,10 +261,14 @@ def test_discord_format_arguments_sanitizes_backticks() -> None:
 
 
 def test_discord_format_arguments_never_truncates() -> None:
-    big = {"spec": "x" * 2000}
+    """Arguments are either shown complete or refused outright; a partial
+    view is never rendered."""
+    big = {"spec": "x" * 900}
     out = DiscordApprovalManager._format_arguments(big)
-    assert "x" * 2000 in out
+    assert "x" * 900 in out
     assert not out.endswith("...")
+    with pytest.raises(ValueError, match="1024"):
+        DiscordApprovalManager._format_arguments({"spec": "x" * 2000})
 
 
 def _make_discord_manager() -> DiscordApprovalManager:
@@ -318,8 +327,8 @@ def test_discord_require_auto_denies_when_arguments_overflow(
             raise AssertionError("reactions must not be added on auto-deny path")
 
     class FakeChannel:
-        async def send(self, *, embed: Any) -> Any:
-            sent.append(embed)
+        async def send(self, *, embed: Any = None, content: Any = None) -> Any:
+            sent.append(content if content is not None else embed)
             return FakeMessage()
 
     async def fake_start(self: DiscordApprovalManager) -> None:
@@ -343,7 +352,8 @@ def test_discord_require_auto_denies_when_arguments_overflow(
 
     assert decision is ApprovalDecision.DENIED
     assert len(sent) == 1
-    assert "auto-denied" in sent[0].title.lower()
+    assert "auto-denied" in str(sent[0]).lower()
+    assert "x" * 1200 not in str(sent[0])  # the notice never carries the arguments
 
 
 # ---------------------------------------------------------------------------
