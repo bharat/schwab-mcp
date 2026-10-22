@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import abc
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,38 @@ def format_arguments(arguments: Mapping[str, str]) -> str:
     lines = [f"{key} = {value}" for key, value in arguments.items()]
     body = "\n".join(lines).replace("`", "ˋ")
     return f"```\n{body}\n```"
+
+
+def parse_account_names(values: Sequence[str] | None) -> Mapping[str, str]:
+    """Parse ``last4=Name`` entries (from CLI flags or comma-split env) into
+    an immutable mapping. Repeated keys: last value wins. Whitespace and
+    empty entries are ignored. Missing separators or empty keys/names are
+    skipped with a warning. Other keys and names are stored unchanged.
+    """
+    if not values:
+        return MappingProxyType({})
+    result: dict[str, str] = {}
+    for raw in values:
+        if not raw:
+            continue
+        for chunk in raw.split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            if "=" not in chunk:
+                logger.warning(
+                    "Ignoring malformed account-name entry %r (expected 'last4=Name')",
+                    chunk,
+                )
+                continue
+            last4, _, name = chunk.partition("=")
+            last4 = last4.strip()
+            name = name.strip()
+            if not last4 or not name:
+                logger.warning("Ignoring empty account-name entry %r", chunk)
+                continue
+            result[last4] = name
+    return MappingProxyType(result)
 
 
 class ApprovalManager(abc.ABC):
@@ -86,4 +119,5 @@ __all__ = [
     "ApprovalRequest",
     "NoOpApprovalManager",
     "format_arguments",
+    "parse_account_names",
 ]
