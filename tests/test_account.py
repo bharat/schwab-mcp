@@ -75,6 +75,7 @@ _RAW_POSITION = {
     "averagePrice": 150.0,
     "currentDayProfitLoss": 100.0,
     "currentDayProfitLossPercentage": 0.01,
+    "longOpenProfitLoss": 2500.0,
     "marketValue": 1550.0,
     "maintenanceRequirement": 0.0,
     "settledLongQuantity": 10,  # should be stripped
@@ -400,7 +401,7 @@ class TestGetAccounts:
         assert pos["quantity"] == 10
         assert pos["marketValue"] == 1550.0
         assert pos["averagePrice"] == 150.0
-        assert pos["unrealizedPL"] == 100.0
+        assert pos["unrealizedPL"] == 2500.0
         assert "settledLongQuantity" not in pos
         assert "maintenanceRequirement" not in pos
 
@@ -561,7 +562,7 @@ class TestGetAccount:
         assert pos["quantity"] == 10
         assert pos["marketValue"] == 1550.0
         assert pos["averagePrice"] == 150.0
-        assert pos["unrealizedPL"] == 100.0
+        assert pos["unrealizedPL"] == 2500.0
         assert "settledLongQuantity" not in pos
 
     def test_include_positions_verbose_returns_enriched_payload(self, monkeypatch, fake_call_factory):
@@ -589,6 +590,7 @@ def test_prune_position_net_quantity_long_minus_short():
         "shortQuantity": 3,
         "averagePrice": 200.0,
         "currentDayProfitLoss": -50.0,
+        "longOpenProfitLoss": 600.0,
         "marketValue": 1400.0,
         "instrument": {"symbol": "TSLA", "assetType": "EQUITY"},
     }
@@ -596,7 +598,7 @@ def test_prune_position_net_quantity_long_minus_short():
     assert pruned["quantity"] == 7  # 10 - 3
     assert pruned["symbol"] == "TSLA"
     assert pruned["marketValue"] == 1400.0
-    assert pruned["unrealizedPL"] == -50.0
+    assert pruned["unrealizedPL"] == 600.0
 
 
 # ---------------------------------------------------------------------------
@@ -754,6 +756,7 @@ def test_get_accounts_compact_output_enriches_identities_and_nets_positions() ->
                                 "marketValue": 700.0,
                                 "averagePrice": 90.0,
                                 "currentDayProfitLoss": 40.0,
+                                "longOpenProfitLoss": 70.0,
                                 "settledLongQuantity": 10,
                             },
                             {
@@ -763,6 +766,7 @@ def test_get_accounts_compact_output_enriches_identities_and_nets_positions() ->
                                 "marketValue": 450.0,
                                 "averagePrice": 150.0,
                                 "currentDayProfitLoss": -25.0,
+                                "shortOpenProfitLoss": 120.0,
                                 "settledShortQuantity": 5,
                             },
                         ],
@@ -797,14 +801,14 @@ def test_get_accounts_compact_output_enriches_identities_and_nets_positions() ->
             "quantity": 7,
             "marketValue": 700.0,
             "averagePrice": 90.0,
-            "unrealizedPL": 40.0,
+            "unrealizedPL": 70.0,
         },
         {
             "symbol": "SHORT",
             "quantity": -3,
             "marketValue": 450.0,
             "averagePrice": 150.0,
-            "unrealizedPL": -25.0,
+            "unrealizedPL": 120.0,
         },
     ]
     assert client.calls.keys() == {
@@ -871,3 +875,140 @@ def test_get_accounts_propagates_primary_endpoint_failure() -> None:
         run(account.get_accounts(make_ctx(client)))
 
     assert "get_accounts" in client.calls
+
+
+# ---------------------------------------------------------------------------
+# unrealizedPL comes from open P/L, not the current-day P/L
+# ---------------------------------------------------------------------------
+
+
+def test_prune_position_unrealized_pl_uses_open_profit_loss():
+    """Regression: unrealizedPL was populated from currentDayProfitLoss.
+
+    That field is the current day's P/L, not open P/L. For some positions
+    Schwab also reports currentDayCost as the full cost basis and subtracts
+    it, so a position with an open gain showed up as a large loss.
+    """
+    position = {
+        "longQuantity": 100,
+        "shortQuantity": 0,
+        "averagePrice": 100.0,
+        "marketValue": 12000.0,
+        "currentDayCost": 10000.0,
+        "currentDayProfitLoss": -10000.0,
+        "longOpenProfitLoss": 2000.0,
+        "instrument": {"symbol": "AAA", "assetType": "COLLECTIVE_INVESTMENT"},
+    }
+    pruned = account._prune_position(position)
+    assert pruned["unrealizedPL"] == 2000.0
+    assert "currentDayProfitLoss" not in pruned
+
+
+def test_prune_position_short_uses_short_open_profit_loss():
+    position = {
+        "longQuantity": 0,
+        "shortQuantity": 50,
+        "averagePrice": 40.0,
+        "marketValue": -1500.0,
+        "currentDayCost": 2000.0,
+        "currentDayProfitLoss": 2000.0,
+        "shortOpenProfitLoss": 500.0,
+        "instrument": {"symbol": "BBB", "assetType": "EQUITY"},
+    }
+    pruned = account._prune_position(position)
+    assert pruned["quantity"] == -50
+    assert pruned["unrealizedPL"] == 500.0
+
+
+def test_prune_position_sums_long_and_short_open_profit_loss() -> None:
+    position = {
+        "longQuantity": 10,
+        "shortQuantity": 3,
+        "longOpenProfitLoss": 70.0,
+        "shortOpenProfitLoss": -20.0,
+        "instrument": {"symbol": "CCC", "assetType": "EQUITY"},
+    }
+    pruned = account._prune_position(position)
+    assert pruned["unrealizedPL"] == 50.0
+
+
+def test_prune_position_omits_unrealized_pl_when_open_pl_missing():
+    position = {
+        "longQuantity": 5,
+        "shortQuantity": 0,
+        "currentDayProfitLoss": 12.0,
+        "instrument": {"symbol": "XYZ"},
+    }
+    pruned = account._prune_position(position)
+    assert "unrealizedPL" not in pruned
+
+
+# ---------------------------------------------------------------------------
+# cashBalance for margin accounts comes from marginBalance + shortBalance
+# ---------------------------------------------------------------------------
+
+
+def test_prune_securities_account_margin_cash_from_margin_and_short_balance():
+    """Regression: margin accounts with shorts reported cashBalance as 0.
+
+    Schwab keeps their cash in marginBalance (negative when borrowing) and
+    shortBalance (short-sale proceeds); the website shows the sum.
+    """
+    sec_account = {
+        "type": "MARGIN",
+        "currentBalances": {
+            "cashBalance": 0,
+            "equity": 10_000.0,
+            "liquidationValue": 10_000.0,
+            "marginBalance": -7_000.0,
+            "shortBalance": 7_500.0,
+        },
+    }
+    balances = account._prune_securities_account(sec_account)["currentBalances"]
+    assert balances["cashBalance"] == 500.0
+    assert "marginBalance" not in balances
+    assert "shortBalance" not in balances
+
+
+def test_prune_securities_account_margin_cash_rounds_to_cents():
+    """Summing cent-valued floats must not leak float noise such as 500.4500000000007."""
+    sec_account = {
+        "type": "MARGIN",
+        "currentBalances": {"cashBalance": 0, "marginBalance": -12_345.67, "shortBalance": 12_846.12},
+    }
+    balances = account._prune_securities_account(sec_account)["currentBalances"]
+    assert balances["cashBalance"] == 500.45
+
+
+def test_prune_securities_account_margin_debit_without_shorts_is_negative_cash():
+    sec_account = {
+        "type": "MARGIN",
+        "currentBalances": {"cashBalance": 0, "marginBalance": -250.0},
+    }
+    balances = account._prune_securities_account(sec_account)["currentBalances"]
+    assert balances["cashBalance"] == -250.0
+
+
+def test_prune_securities_account_derives_cash_when_cash_balance_missing():
+    sec_account = {
+        "type": "MARGIN",
+        "currentBalances": {"marginBalance": -250.0, "shortBalance": 300.0},
+    }
+    balances = account._prune_securities_account(sec_account)["currentBalances"]
+    assert balances["cashBalance"] == 50.0
+
+
+def test_prune_securities_account_keeps_nonzero_cash_balance():
+    """A non-zero cashBalance wins even when marginBalance + shortBalance differs."""
+    sec_account = {
+        "type": "MARGIN",
+        "currentBalances": {"cashBalance": 1_000.0, "marginBalance": 1_000.0, "shortBalance": 250.0},
+    }
+    balances = account._prune_securities_account(sec_account)["currentBalances"]
+    assert balances["cashBalance"] == 1_000.0
+
+
+def test_prune_securities_account_cash_account_without_margin_fields_unchanged():
+    sec_account = {"type": "CASH", "currentBalances": {"cashBalance": 0, "liquidationValue": 0}}
+    balances = account._prune_securities_account(sec_account)["currentBalances"]
+    assert balances["cashBalance"] == 0

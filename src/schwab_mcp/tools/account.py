@@ -53,10 +53,34 @@ def _prune_position(position: dict[str, Any]) -> dict[str, Any]:
     average_price = position.get("averagePrice")
     if average_price is not None:
         result["averagePrice"] = average_price
-    unrealized_pl = position.get("currentDayProfitLoss")
-    if unrealized_pl is not None:
-        result["unrealizedPL"] = unrealized_pl
+    # Open P/L since purchase lives in longOpenProfitLoss/shortOpenProfitLoss.
+    # currentDayProfitLoss is the current day's P/L only, and for some
+    # positions Schwab subtracts the full cost basis (currentDayCost) from it,
+    # so it is not exposed in compact output.
+    open_pl = [
+        value
+        for value in (position.get("longOpenProfitLoss"), position.get("shortOpenProfitLoss"))
+        if isinstance(value, (int, float))
+    ]
+    if open_pl:
+        result["unrealizedPL"] = sum(open_pl)
     return result
+
+
+def _margin_cash_balance(balances: dict[str, Any]) -> float | None:
+    """Return a margin account's net cash, or None when it cannot be derived.
+
+    For margin accounts carrying short positions or a margin debit, Schwab
+    reports cashBalance as 0 and tracks cash in marginBalance (negative
+    when borrowing) plus shortBalance (short-sale proceeds). Their sum is
+    the cash figure Schwab shows on its website. The sum is rounded to
+    cents so float addition does not leak noise into compact output.
+    """
+    margin_balance = balances.get("marginBalance")
+    short_balance = balances.get("shortBalance", 0)
+    if not isinstance(margin_balance, (int, float)) or not isinstance(short_balance, (int, float)):
+        return None
+    return round(margin_balance + short_balance, 2)
 
 
 def _prune_securities_account(sec_account: dict[str, Any]) -> dict[str, Any]:
@@ -64,7 +88,12 @@ def _prune_securities_account(sec_account: dict[str, Any]) -> dict[str, Any]:
     current_balances = sec_account.get("currentBalances")
     if not isinstance(current_balances, dict):
         current_balances = {}
-    result["currentBalances"] = {k: v for k, v in current_balances.items() if k in _COMPACT_BALANCE_FIELDS}
+    compact_balances = {k: v for k, v in current_balances.items() if k in _COMPACT_BALANCE_FIELDS}
+    if not compact_balances.get("cashBalance"):
+        margin_cash = _margin_cash_balance(current_balances)
+        if margin_cash is not None:
+            compact_balances["cashBalance"] = margin_cash
+    result["currentBalances"] = compact_balances
     if "positions" in sec_account:
         positions = sec_account["positions"]
         if isinstance(positions, list):
@@ -192,16 +221,16 @@ async def get_accounts(
     ctx: SchwabContext,
     include_positions: Annotated[
         bool,
-        "Request holdings/positions for each account. In compact mode (default) positions are pruned to symbol, quantity, marketValue, averagePrice, unrealizedPL; verbose=True returns the raw, unpruned position fields instead.",
+        "Request holdings/positions for each account. In compact mode (default) positions are pruned to symbol, quantity, marketValue, averagePrice, unrealizedPL (open P/L since purchase); verbose=True returns the raw, unpruned position fields instead.",
     ] = False,
     verbose: Annotated[
         bool,
-        "Return the full raw payload (all balance types, and full position fields if include_positions=True) instead of the compact default.",
+        "Return the full raw payload (all balance types, and full position fields if include_positions=True) instead of the compact default. In raw balances, margin accounts with short positions or a margin debit report cashBalance as 0; their cash is marginBalance + shortBalance.",
     ] = False,
 ) -> JSONType:
     """Returns balances/info for all linked accounts (funds, cash, margin); pass include_positions=True to also include holdings.
     Includes each account's accountHash (required for account-specific calls like get_account, orders, transactions), nickname, and isDefault (the account marked as primary in Schwab user preferences).
-    By default returns compact fields only (account type/number, equity/buyingPower/cashBalance/cashAvailableForTrading/liquidationValue from currentBalances; initialBalances and projectedBalances are dropped; positions if included are reduced to symbol, net quantity (positive=long/negative=short), marketValue, averagePrice, unrealizedPL); pass verbose=True for the full raw payload (positions unpruned if include_positions=True).
+    By default returns compact fields only (account type/number, equity/buyingPower/cashBalance/cashAvailableForTrading/liquidationValue from currentBalances, with cashBalance derived as marginBalance + shortBalance for margin accounts that report it as 0; initialBalances and projectedBalances are dropped; positions if included are reduced to symbol, net quantity (positive=long/negative=short), marketValue, averagePrice, unrealizedPL (open P/L since purchase)); pass verbose=True for the full raw payload (positions unpruned if include_positions=True).
     """
     return await _get_account_response(
         ctx,
@@ -215,16 +244,16 @@ async def get_account(
     account_hash: Annotated[str, "Account hash for the Schwab account (from get_accounts)"],
     include_positions: Annotated[
         bool,
-        "Request holdings/positions. In compact mode (default) positions are pruned to symbol, quantity, marketValue, averagePrice, unrealizedPL; verbose=True returns the raw, unpruned position fields instead.",
+        "Request holdings/positions. In compact mode (default) positions are pruned to symbol, quantity, marketValue, averagePrice, unrealizedPL (open P/L since purchase); verbose=True returns the raw, unpruned position fields instead.",
     ] = False,
     verbose: Annotated[
         bool,
-        "Return the full raw payload (all balance types, and full position fields if include_positions=True) instead of the compact default.",
+        "Return the full raw payload (all balance types, and full position fields if include_positions=True) instead of the compact default. In raw balances, margin accounts with short positions or a margin debit report cashBalance as 0; their cash is marginBalance + shortBalance.",
     ] = False,
 ) -> JSONType:
     """Returns balance/info for a specific account via account_hash (from get_accounts); pass include_positions=True to also include holdings. Includes funds, cash, margin info.
     Includes the account's accountHash, nickname, and isDefault for self-describing output.
-    By default returns compact fields only (account type/number, equity/buyingPower/cashBalance/cashAvailableForTrading/liquidationValue from currentBalances; initialBalances and projectedBalances are dropped; positions if included are reduced to symbol, net quantity (positive=long/negative=short), marketValue, averagePrice, unrealizedPL); pass verbose=True for the full raw payload (positions unpruned if include_positions=True).
+    By default returns compact fields only (account type/number, equity/buyingPower/cashBalance/cashAvailableForTrading/liquidationValue from currentBalances, with cashBalance derived as marginBalance + shortBalance for margin accounts that report it as 0; initialBalances and projectedBalances are dropped; positions if included are reduced to symbol, net quantity (positive=long/negative=short), marketValue, averagePrice, unrealizedPL (open P/L since purchase)); pass verbose=True for the full raw payload (positions unpruned if include_positions=True).
     """
     return await _get_account_response(
         ctx,
