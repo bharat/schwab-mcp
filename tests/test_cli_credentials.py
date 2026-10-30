@@ -261,6 +261,7 @@ class TestServerDiscordTokenCredentialsFile:
 
         class FakeDiscordManager:
             authorized_user_ids = staticmethod(lambda ids: frozenset(ids) if ids else frozenset())
+            parse_account_names = staticmethod(lambda values: {})
 
             def __init__(self, settings):
                 captured["discord_manager_settings"] = settings
