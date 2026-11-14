@@ -15,7 +15,12 @@ compact defaults with `verbose=True` escape hatches where response size matters.
 - `_registration.py` centralizes MCPServer registration. `register_tool()` converts
   MCP `Context` arguments into `SchwabContext`, attaches read/write annotations,
   applies optional `result_transform`, and wraps write tools in the approval
-  workflow unless a tool supplies custom approval handling.
+  workflow unless a tool supplies custom approval handling. `run_approval()`
+  allows at most `MAX_PENDING_APPROVALS` (3) concurrent requests, tracked on
+  `SchwabServerContext.pending_approvals`, and refuses more with
+  `PermissionError` before the backend is contacted. The previewed-order
+  executors call `ensure_approval_capacity()` before consuming the preview,
+  so a refusal leaves it usable.
 - `_protocols.py` defines Protocol facades for each Schwab client namespace
   (`accounts`, `orders`, `quotes`, `options`, `price_history`, etc.). These keep
   `SchwabContext` access type-checkable without coupling tool code to concrete
@@ -30,7 +35,8 @@ compact defaults with `verbose=True` escape hatches where response size matters.
   `strip_noise`, applied as a transform in `server.py` before returning data
   to MCP callers.
 - Response shaping is intentionally local to each domain: accounts prune balances
-  and positions while enriching hashes/nicknames, quotes keep key quote fields,
+  and positions while enriching hashes/nicknames (compact output then masks
+  `accountNumber` to its last 4 characters), quotes keep key quote fields,
   options prune per-contract greeks/liquidity fields and default expiration
   windows to 60 days, and orders prune nested order payloads recursively.
 - Order construction is split between `orders.py` orchestration and
@@ -47,7 +53,10 @@ compact defaults with `verbose=True` escape hatches where response size matters.
 - `fishing.py` runs range-based, chunked option-order fishing campaigns: one
   approved submission spawns a background task that places LIMIT chunks and
   cancel/replaces them toward a terminal price. It calls `orders.py` internal
-  builders directly and tracks campaigns in an in-memory registry.
+  builders directly and tracks campaigns in an in-memory registry. Before
+  creating a campaign it runs the same symbol, quantity, price, session, and
+  duration checks the builders apply, and requires whole-cent range prices,
+  so bad input is refused before any child order is placed.
 
 ## Flow
 
@@ -71,12 +80,21 @@ compact defaults with `verbose=True` escape hatches where response size matters.
     `_finalize_preview` and in `preview_replacement_order`, so every preview
     path shares it. Preview account hashes are validated before asset lookup
     or preview requests; replacement target IDs use the same safe identifier
-    rule. `place_previewed_order()` consumes only PLACE_ORDER entries,
+    rule (`utils.validate_identifier`), which the read tools (`get_order`,
+    `get_orders`, `get_account`, `get_transactions`, `get_transaction`) also
+    apply. Order builders validate symbols (`_SAFE_SYMBOL`), positive integer
+    quantities, instructions, sessions and option-combo legs before any call;
+    combo orders accept only NET_CREDIT/NET_DEBIT (price required) or
+    NET_ZERO/MARKET (no price), and the nested `_OrderDescInput` schema is
+    closed so unknown keys are refused at the MCP boundary. `place_previewed_order()` consumes only PLACE_ORDER entries,
     while `preview_replacement_order()` caches a typed single-leg replacement
     bound to an existing order and `replace_previewed_order()` consumes only
     REPLACE_ORDER entries. Both custom executors request approval and return
-    compact post-write order status. Replacement approval summaries reflect the
-    built payload, and replacement target IDs reject URL-unsafe values. A failed
+    compact post-write order status. Every approval summary is rendered by
+    `_spec_summary()` from the built spec (all legs, nested child orders,
+    prices, session, duration) before any API call; values it cannot show
+    faithfully fail the preview. Replacement target IDs reject URL-unsafe
+    values. A failed
     status fetch, including an HTTP transport failure, preserves the successful
     write response as a fallback. `cancel_order()` validates both identifiers
     before custom approval and the cancel request, and preserves its fallback
@@ -89,6 +107,11 @@ compact defaults with `verbose=True` escape hatches where response size matters.
   and progress/warning reporting.
 - Uses MCPServer's `server.tool()` through `_registration.register_tool()` so tool
   docs, annotations, and parameter metadata come from Python signatures/docstrings.
+  `register_tool()` then closes each tool's SDK argument model
+  (`_forbid_unknown_arguments()`, `extra="forbid"` plus a published
+  `additionalProperties: false`), so an unknown top-level argument is refused
+  before the tool runs; `verify_closed_arguments()` re-checks every registered
+  tool at server startup.
 - Integrates with `schwab_mcp.approvals` for write safeguards: automatic approval
   wrapping for simple writes and explicit approval requests for previewed order
   placement.

@@ -13,7 +13,9 @@ from contextlib import suppress
 from typing import Annotated, Any, Union, cast, get_args, get_origin, get_type_hints
 
 from mcp.server.mcpserver import Context as MCPContext, MCPServer
+from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase
 from mcp.types import ToolAnnotations
+from pydantic import ConfigDict, ValidationError
 
 from schwab_mcp.approvals import ApprovalDecision, ApprovalRequest
 from schwab_mcp.context import SchwabContext
@@ -23,6 +25,8 @@ logger = logging.getLogger(__name__)
 ToolFn = Callable[..., Awaitable[Any]]
 
 _APPROVAL_PROGRESS_INTERVAL = 5.0
+# A looping or misbehaving model must not be able to flood the reviewer.
+MAX_PENDING_APPROVALS = 3
 _APPROVAL_WAIT_MESSAGE = "Waiting for reviewer approval…"
 _REDACTED_ARG_NAMES = frozenset({"account_hash"})
 
@@ -139,6 +143,23 @@ def _redact(name: str, value: Any) -> Any:
     return f"…{raw[-4:]}" if len(raw) > 4 else "…"
 
 
+def ensure_approval_capacity(context: SchwabContext, tool_name: str) -> None:
+    """Raise ``PermissionError`` when ``MAX_PENDING_APPROVALS`` are already waiting.
+
+    Tools that consume single-use state before approval (the previewed-order
+    executors) call this first, so a refusal leaves that state usable. With no
+    await between this check and :func:`run_approval`'s own check, the two
+    cannot disagree.
+    """
+    if context.schwab.pending_approvals >= MAX_PENDING_APPROVALS:
+        message = (
+            f"Refusing approval request for tool '{tool_name}': {MAX_PENDING_APPROVALS} approvals are "
+            "already pending. Wait for the reviewer to answer them before requesting another."
+        )
+        logger.warning(message)
+        raise PermissionError(message)
+
+
 async def run_approval(context: SchwabContext, request: ApprovalRequest) -> ApprovalDecision:
     """Run an approval request through progress reporting and the configured
     :class:`ApprovalManager`, returning the resulting decision.
@@ -146,18 +167,29 @@ async def run_approval(context: SchwabContext, request: ApprovalRequest) -> Appr
     Shared by the automatic write-tool approval wrapping below and by tools
     that need to build their own :class:`ApprovalRequest` (e.g. to surface
     resolved state rather than raw call arguments to the reviewer).
-    """
-    if _has_progress_token(context):
-        await context.report_progress(0, 1, _APPROVAL_WAIT_MESSAGE)
-    keepalive_task = _start_approval_keepalive(context)
 
+    At most ``MAX_PENDING_APPROVALS`` requests may wait on the reviewer at
+    once; a further request raises ``PermissionError`` without reaching the
+    approval backend.
+    """
+    server = context.schwab
+    ensure_approval_capacity(context, request.tool_name)
+
+    server.pending_approvals += 1
     try:
-        decision = await context.approvals.require(request)
+        if _has_progress_token(context):
+            await context.report_progress(0, 1, _APPROVAL_WAIT_MESSAGE)
+        keepalive_task = _start_approval_keepalive(context)
+
+        try:
+            decision = await context.approvals.require(request)
+        finally:
+            if keepalive_task is not None:
+                keepalive_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await keepalive_task
     finally:
-        if keepalive_task is not None:
-            keepalive_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await keepalive_task
+        server.pending_approvals -= 1
 
     await _report_approval_completion(context, decision)
     return decision
@@ -357,6 +389,58 @@ def _wrap_with_path_param_validation(func: ToolFn) -> ToolFn:
     return wrapper
 
 
+def _forbid_unknown_arguments(server: MCPServer, name: str) -> None:
+    """Make the registered tool ``name`` refuse unknown top-level arguments.
+
+    MCPServer builds each tool's argument model with pydantic's default of
+    ignoring extra keys, so a misnamed argument (``stop_loss`` for
+    ``loss_price``) would be dropped and the call would run without it. This
+    swaps in a subclass with ``extra="forbid"``, so such a call is refused
+    before conversion or execution, and advertises the closed schema. The SDK
+    reads ``fn_metadata.arg_model`` on every call, so the swap takes effect at
+    once. Registration fails rather than leaving a tool open if the SDK no
+    longer exposes what this relies on.
+    """
+    tool = server._tool_manager.get_tool(name)
+    if tool is None:
+        raise RuntimeError(f"Tool {name!r} was not registered; cannot close its argument model")
+    base: type[ArgModelBase] = tool.fn_metadata.arg_model
+    closed = cast(
+        type[ArgModelBase],
+        types.new_class(
+            base.__name__,
+            (base,),
+            exec_body=lambda ns: ns.update(__module__=base.__module__, model_config=ConfigDict(extra="forbid")),
+        ),
+    )
+    tool.fn_metadata.arg_model = closed
+    tool.parameters = closed.model_json_schema(by_alias=True)
+
+
+_UNKNOWN_ARGUMENT_PROBE = "schwab_mcp_unknown_argument_probe"
+
+
+def verify_closed_arguments(server: MCPServer) -> None:
+    """Refuse to start if any registered tool accepts unknown top-level arguments.
+
+    Probes each tool's real validator with an unknown key and checks that the
+    published schema says ``additionalProperties: false``. This catches a tool
+    registered around :func:`register_tool` and an SDK change that would make
+    :func:`_forbid_unknown_arguments` silently stop working.
+    """
+    open_tools: list[str] = []
+    for tool in server._tool_manager.list_tools():
+        try:
+            tool.fn_metadata.validate_arguments({_UNKNOWN_ARGUMENT_PROBE: None})
+        except ValidationError as exc:
+            refused = any(error["type"] == "extra_forbidden" for error in exc.errors())
+            if refused and tool.parameters.get("additionalProperties") is False:
+                continue
+        open_tools.append(tool.name)
+    if open_tools:
+        raise RuntimeError(f"Refusing to start: these tools accept unknown arguments: {', '.join(sorted(open_tools))}")
+
+
 def register_tool(
     server: MCPServer,
     func: ToolFn,
@@ -398,6 +482,7 @@ def register_tool(
         description=func.__doc__,
         annotations=tool_annotations,
     )(func)
+    _forbid_unknown_arguments(server, func.__name__)
 
 
-__all__ = ["register_tool", "run_approval"]
+__all__ = ["register_tool", "run_approval", "verify_closed_arguments"]

@@ -390,6 +390,40 @@ class TestIntegration:
                 )
             )
 
+    @pytest.mark.parametrize(
+        ("overrides", "match"),
+        [
+            ({"symbol": "COIN\n260717C00250000"}, "symbol must be"),
+            ({"quantity": True}, "quantity must be a positive integer"),
+            ({"range_start": 9.005}, "more than 2 decimal places"),
+            ({"range_end": 0.0525, "range_start": 0.10}, "whole number of cents"),
+            ({"range_end": 0.0}, "finite number above zero"),
+            ({"step": float("nan")}, "step must be a finite number"),
+            ({"session": "OVERNIGHT"}, "Invalid session"),
+            ({"duration": "FOREVER"}, "Invalid duration"),
+        ],
+    )
+    def test_shared_order_checks_refuse_before_any_placement(self, monkeypatch, overrides, match):
+        """Bad order inputs are refused up front, not inside the background campaign."""
+        _patch_call_to_passthrough(monkeypatch)
+        client = _FakeOrdersClient()
+        ctx = make_ctx(client)
+        kwargs: dict[str, Any] = {
+            "account_hash": "abcd1234",
+            "symbol": "COIN  260717C00250000",
+            "quantity": 4,
+            "instruction": "SELL_TO_OPEN",
+            "range_start": 9.0,
+            "range_end": 8.4,
+        }
+        kwargs.update(overrides)
+
+        with pytest.raises(ValueError, match=match):
+            run(fishing.place_option_order_with_fishing(ctx, **kwargs))
+
+        assert client.placed == []
+        assert fishing._CAMPAIGNS == {}
+
     def test_place_and_cancel_immediately(self, monkeypatch):
         """Submit a campaign, immediately cancel it; should clean up gracefully."""
         _patch_call_to_passthrough(monkeypatch)

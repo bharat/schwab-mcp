@@ -24,10 +24,25 @@ For most users, installing via `uv tool` or `pip` is easiest:
 
 ```bash
 # Using uv (recommended for isolation)
-uv tool install git+https://github.com/jkoelker/schwab-mcp.git
+uv tool install 'schwab-mcp[ta] @ git+https://github.com/jkoelker/schwab-mcp.git'
 
 # Using pip
-pip install git+https://github.com/jkoelker/schwab-mcp.git
+pip install 'schwab-mcp[ta] @ git+https://github.com/jkoelker/schwab-mcp.git'
+```
+
+The `ta` extra installs pandas and pandas-ta-classic for the technical-analysis
+tools (SMA, RSI, ...). Without it those tools are skipped at startup with a
+warning; pass `--no-technical-tools` to run without them deliberately. Add the
+`signal` extra (`schwab-mcp[ta,signal]`) for Signal approvals.
+
+Pass secrets through environment variables (or `schwab-mcp save-credentials`)
+rather than command-line flags, which are visible to other local users in
+`ps` and end up in shell history:
+
+```bash
+export SCHWAB_CLIENT_ID=YOUR_KEY
+export SCHWAB_CLIENT_SECRET=YOUR_SECRET
+export SCHWAB_MCP_DISCORD_TOKEN=BOT_TOKEN   # only for Discord approvals
 ```
 
 ### Authentication
@@ -39,6 +54,9 @@ terminal:
 ```bash
 schwab-mcp save-credentials   # prompts for Client ID, Client Secret (hidden), Discord token (hidden, optional)
 ```
+
+Skip this step if you export `SCHWAB_CLIENT_ID` / `SCHWAB_CLIENT_SECRET`
+instead (see above).
 
 Then run the OAuth flow to generate a token file:
 
@@ -54,14 +72,17 @@ a token will be saved to `~/.local/share/schwab-mcp/token.yaml`.
 Start the MCP server to expose the tools to your MCP client.
 
 ```bash
-# Basic Read-Only Mode (Safest) — credentials read from save-credentials file
+# Credentials come from the save-credentials file or from
+# SCHWAB_CLIENT_ID / SCHWAB_CLIENT_SECRET (see above).
+
+# Basic Read-Only Mode (Safest)
 schwab-mcp server
 
 # Streamable HTTP (for reverse proxies / remote MCP connectors)
-schwab-mcp server --client-id YOUR_KEY --client-secret YOUR_SECRET \
-  --http --host 127.0.0.1 --port 8000
+schwab-mcp server --http --host 127.0.0.1 --port 8000
 
-# With Trading Enabled (Discord approval)
+# With Trading Enabled (Discord approval; bot token from save-credentials or
+# SCHWAB_MCP_DISCORD_TOKEN)
 schwab-mcp server \
   --discord-channel-id CHANNEL_ID \
   --discord-approver YOUR_USER_ID

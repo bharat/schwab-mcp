@@ -15,18 +15,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Annotated, Any, cast
 
 from mcp.server.mcpserver import MCPServer
 
 from schwab_mcp.context import SchwabContext
 from schwab_mcp.tools._registration import register_tool
-from schwab_mcp.tools.orders import _apply_order_settings, _build_option_order_spec
+from schwab_mcp.tools.orders import (
+    _VALID_SESSIONS,
+    _apply_order_settings,
+    _build_option_order_spec,
+    _format_order_price,
+    _normalize_choice,
+    _normalize_duration,
+    _validate_quantity,
+    _validate_symbol,
+)
 from schwab_mcp.tools.utils import JSONType, call
 
 logger = logging.getLogger(__name__)
@@ -208,6 +219,40 @@ def _validate_inputs(
         chunks_resolved = list(chunks)
 
     return instruction, chunks_resolved, pattern_normalized
+
+
+def _validate_order_fields(
+    symbol: str,
+    quantity: int,
+    range_start: float,
+    range_end: float,
+    step: float,
+    session: str,
+    duration: str,
+) -> tuple[str, str]:
+    """Apply the shared order-input checks before any child order is placed.
+
+    The campaign builds every child order through ``_build_option_order_spec``
+    and ``_apply_order_settings``, which refuse a bad symbol, quantity,
+    price, session, or duration. Running the same checks here means such a
+    value is refused up front instead of failing the background campaign
+    after some chunks are already working. Range prices must be whole cents
+    because the price walk rounds every adjusted price to cents, and the
+    approval prompt shows them that way. Returns the normalized session and
+    duration.
+    """
+    _validate_symbol(symbol)
+    _validate_quantity(quantity)
+    for field_name, value in (("range_start", range_start), ("range_end", range_end)):
+        _format_order_price(value, field_name)
+        if Decimal(str(value)) != Decimal(str(value)).quantize(Decimal("0.01")):
+            raise ValueError(f"{field_name} {value!r} must be a whole number of cents")
+    if isinstance(step, bool) or not isinstance(step, (int, float)) or not math.isfinite(step):
+        raise ValueError(f"step must be a finite number, got {step!r}")
+    return (
+        _normalize_choice(session, _VALID_SESSIONS, "session"),
+        _normalize_duration(duration),
+    )
 
 
 # ===== Price-pattern logic =====
@@ -652,6 +697,15 @@ async def place_option_order_with_fishing(
 
     *Write operation.* Approval required.
     """
+    session_resolved, duration_resolved = _validate_order_fields(
+        symbol,
+        quantity,
+        range_start,
+        range_end,
+        step if step is not None else _DEFAULT_STEP,
+        session or "NORMAL",
+        duration or "DAY",
+    )
     instr, chunks_resolved, pattern_resolved = _validate_inputs(
         instruction,
         quantity,
@@ -680,8 +734,8 @@ async def place_option_order_with_fishing(
             step_interval_seconds if step_interval_seconds is not None else _DEFAULT_INTERVAL_SEC
         ),
         timing_jitter_pct=float(timing_jitter_pct if timing_jitter_pct is not None else _DEFAULT_JITTER_PCT),
-        session=session or "NORMAL",
-        duration=duration or "DAY",
+        session=session_resolved,
+        duration=duration_resolved,
         started_at=datetime.now(timezone.utc),
         status=STATUS_RUNNING,
     )
