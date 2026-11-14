@@ -177,7 +177,8 @@ def auth(
         click.echo("  2. Callback URL doesn't match Developer Portal")
         click.echo("  3. Callback URL was changed recently (wait until market close)")
         click.echo("  4. Browser blocked the popup or redirect")
-        return 1
+        # Click ignores a command's return value, so exit explicitly.
+        raise SystemExit(1) from e
 
 
 def _select_write_mode(
@@ -458,6 +459,9 @@ def server(
                 details={"client_type": type(client).__name__},
             )
             return 1
+    except schwab_auth.LoginRequiredError as e:
+        send_error_response(str(e), code=401, details={"token_expired": True})
+        return 1
     except Exception as e:
         logger.exception("Error initializing Schwab client")
         send_error_response(

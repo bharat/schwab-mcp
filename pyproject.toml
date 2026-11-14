@@ -16,7 +16,9 @@ dependencies = [
     "platformdirs>=4.5.0",
     "python-toon>=0.1.2",
     "pyyaml>=6.0.3",
-    "schwab-py",
+    # base_url support exists only in this fork; pinned by commit so pip and
+    # uv resolve the same code.
+    "schwab-py @ git+https://github.com/jkoelker/schwab-py@fef17718b811b88dcf5391f1d0cf1b39c12c0236",
     "typing-extensions>=4.12.0",
     "websockets>=14.0",
 ]
@@ -25,6 +27,11 @@ dependencies = [
 # Signal approvals talk to a local signal-cli REST daemon over HTTP (httpx,
 # already a core dependency) and listen for replies on its websocket.
 signal = ["websockets>=14.0"]
+# Technical-analysis tools (sma, rsi, ...). Without it they are skipped at startup.
+ta = [
+    "pandas>=2.2.2",
+    "pandas-ta-classic>=0.3.36",
+]
 
 [project.scripts]
 schwab-mcp = "schwab_mcp:main"
@@ -32,6 +39,9 @@ schwab-mcp = "schwab_mcp:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [dependency-groups]
 dev = [
@@ -134,6 +144,3 @@ exclude = ["src/schwab_mcp/tools/_protocols.py"]
 # old. Mirrors `minimumReleaseAge` in renovate.json so local/CI `uv lock`
 # respects the same gate as PR creation.
 exclude-newer = "14 days"
-
-[tool.uv.sources]
-schwab-py = { git = "https://github.com/jkoelker/schwab-py.git", rev = "proxy_support" }

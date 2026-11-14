@@ -8,7 +8,7 @@ from mcp.server.mcpserver import MCPServer
 
 from schwab_mcp.context import SchwabContext
 from schwab_mcp.tools._registration import register_tool
-from schwab_mcp.tools.utils import JSONType, SchwabAPIError, call
+from schwab_mcp.tools.utils import JSONType, SchwabAPIError, call, validate_identifier
 
 _COMPACT_ACCOUNT_FIELDS = frozenset({"type", "accountNumber", "roundTrips", "isDayTrader"})
 
@@ -170,6 +170,8 @@ async def _get_account_response(
     verbose: bool,
 ) -> JSONType:
     """Fetch, shape, and enrich an account endpoint response."""
+    if account_hash is not None:
+        validate_identifier(account_hash, "account_hash")
     identity_map = await _get_identity_map(ctx)
     kwargs: dict[str, Any] = {}
     if include_positions:
@@ -181,7 +183,24 @@ async def _get_account_response(
         result = await call(ctx.accounts.get_account, account_hash, **kwargs)
 
     payload = result if verbose else _prune_account_response(result)
-    return _enrich_with_identity(payload, identity_map, fallback_hash=account_hash)
+    enriched = _enrich_with_identity(payload, identity_map, fallback_hash=account_hash)
+    # Identity enrichment joins on the full number, so mask only afterwards.
+    return enriched if verbose else _mask_account_numbers(enriched)
+
+
+def _mask_account_number(number: Any) -> Any:
+    """Show only the last 4 characters of a brokerage account number."""
+    return f"...{number[-4:]}" if isinstance(number, str) and number else number
+
+
+def _mask_account_numbers(payload: JSONType) -> JSONType:
+    """Mask ``accountNumber`` in each securitiesAccount of a compact payload."""
+    items = payload if isinstance(payload, list) else [payload]
+    for item in items:
+        sec = item.get("securitiesAccount") if isinstance(item, dict) else None
+        if isinstance(sec, dict) and "accountNumber" in sec:
+            sec["accountNumber"] = _mask_account_number(sec["accountNumber"])
+    return payload
 
 
 def _enrich_with_identity(
@@ -230,7 +249,7 @@ async def get_accounts(
 ) -> JSONType:
     """Returns balances/info for all linked accounts (funds, cash, margin); pass include_positions=True to also include holdings.
     Includes each account's accountHash (required for account-specific calls like get_account, orders, transactions), nickname, and isDefault (the account marked as primary in Schwab user preferences).
-    By default returns compact fields only (account type/number, equity/buyingPower/cashBalance/cashAvailableForTrading/liquidationValue from currentBalances, with cashBalance derived as marginBalance + shortBalance for margin accounts that report it as 0; initialBalances and projectedBalances are dropped; positions if included are reduced to symbol, net quantity (positive=long/negative=short), marketValue, averagePrice, unrealizedPL (open P/L since purchase)); pass verbose=True for the full raw payload (positions unpruned if include_positions=True).
+    By default returns compact fields only (account type, accountNumber masked to its last 4 digits as '...1234', equity/buyingPower/cashBalance/cashAvailableForTrading/liquidationValue from currentBalances, with cashBalance derived as marginBalance + shortBalance for margin accounts that report it as 0; initialBalances and projectedBalances are dropped; positions if included are reduced to symbol, net quantity (positive=long/negative=short), marketValue, averagePrice, unrealizedPL (open P/L since purchase)); pass verbose=True for the full raw payload (positions unpruned if include_positions=True).
     """
     return await _get_account_response(
         ctx,
@@ -253,7 +272,7 @@ async def get_account(
 ) -> JSONType:
     """Returns balance/info for a specific account via account_hash (from get_accounts); pass include_positions=True to also include holdings. Includes funds, cash, margin info.
     Includes the account's accountHash, nickname, and isDefault for self-describing output.
-    By default returns compact fields only (account type/number, equity/buyingPower/cashBalance/cashAvailableForTrading/liquidationValue from currentBalances, with cashBalance derived as marginBalance + shortBalance for margin accounts that report it as 0; initialBalances and projectedBalances are dropped; positions if included are reduced to symbol, net quantity (positive=long/negative=short), marketValue, averagePrice, unrealizedPL (open P/L since purchase)); pass verbose=True for the full raw payload (positions unpruned if include_positions=True).
+    By default returns compact fields only (account type, accountNumber masked to its last 4 digits as '...1234', equity/buyingPower/cashBalance/cashAvailableForTrading/liquidationValue from currentBalances, with cashBalance derived as marginBalance + shortBalance for margin accounts that report it as 0; initialBalances and projectedBalances are dropped; positions if included are reduced to symbol, net quantity (positive=long/negative=short), marketValue, averagePrice, unrealizedPL (open P/L since purchase)); pass verbose=True for the full raw payload (positions unpruned if include_positions=True).
     """
     return await _get_account_response(
         ctx,

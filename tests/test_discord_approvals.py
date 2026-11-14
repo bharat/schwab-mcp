@@ -618,7 +618,9 @@ async def test_conflicting_reactions_keep_first_decision_during_message_edit() -
 
 @pytest.mark.anyio
 async def test_require_returns_decision_without_waiting_for_message_edit() -> None:
-    mgr = make_manager(make_settings(timeout_seconds=0.05))
+    # The approval timeout must outlast a slow runner: if it fires before the
+    # reaction lands, require() expires and blocks in the held edit itself.
+    mgr = make_manager(make_settings(timeout_seconds=30.0))
     mgr._ready.set()
     channel = make_fake_channel()
     msg = make_fake_message(channel)
@@ -961,3 +963,54 @@ async def test_no_names_preserves_malformed_arguments() -> None:
     # The finalized embed omits Arguments by design (no argument dump in
     # the channel history), so only the pending embed is checked above.
     assert "Arguments" not in {field.name for field in final.fields}
+
+
+@pytest.mark.anyio
+async def test_start_raises_login_failure_instead_of_hanging(monkeypatch) -> None:
+    """A rejected token surfaces from start() rather than blocking on ready forever."""
+    mgr = make_manager()
+
+    async def reject(token: str) -> None:
+        raise discord.LoginFailure("Improper token has been passed.")
+
+    monkeypatch.setattr(mgr._client, "start", reject)
+
+    with pytest.raises(discord.LoginFailure):
+        await asyncio.wait_for(mgr.start(), 3)
+
+    assert mgr._runner is None
+
+
+@pytest.mark.anyio
+async def test_start_raises_when_runner_exits_before_ready(monkeypatch) -> None:
+    mgr = make_manager()
+
+    async def quit_early(token: str) -> None:
+        return None
+
+    monkeypatch.setattr(mgr._client, "start", quit_early)
+
+    with pytest.raises(RuntimeError, match="before it was ready"):
+        await asyncio.wait_for(mgr.start(), 3)
+
+
+@pytest.mark.anyio
+async def test_start_wait_is_bounded(monkeypatch) -> None:
+    from schwab_mcp.approvals import discord as discord_approvals
+
+    mgr = make_manager()
+    monkeypatch.setattr(discord_approvals, "_START_TIMEOUT_SECONDS", 0.05)
+
+    async def hang(token: str) -> None:
+        await asyncio.sleep(60)
+
+    async def close() -> None:
+        return None
+
+    monkeypatch.setattr(mgr._client, "start", hang)
+    monkeypatch.setattr(mgr._client, "close", close)
+
+    with pytest.raises(TimeoutError, match="not ready within"):
+        await asyncio.wait_for(mgr.start(), 3)
+
+    assert mgr._runner is None
