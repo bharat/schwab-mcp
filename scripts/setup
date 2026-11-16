@@ -5,7 +5,7 @@ set -e
 cd "$(dirname "$0")/.."
 
 # uv (Python package/venv manager — this project's build tool)
-curl -LsSf https://astral.sh/uv/install.sh | sh
+python3 -m pip install --user --quiet uv==0.12.6
 export PATH="$HOME/.local/bin:$PATH"
 
 # Project deps: dev tools + technical-analysis extras, pinned to uv.lock.
@@ -20,7 +20,3 @@ uv sync --frozen --group dev --group ta
 git config --local --unset-all core.hooksPath 2>/dev/null || true
 uv tool install pre-commit
 pre-commit install
-
-# Editor / agent CLIs
-curl -fsSL https://cursor.com/install | bash
-curl -fsSL https://claude.ai/install.sh | bash
