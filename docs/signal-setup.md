@@ -65,6 +65,11 @@ seconds (default 600), is treated as a denial.
 > indefinitely without ever seeing your replies. Pass `-e MODE=json-rpc` to
 > the container.
 
+Both `POST /v2/send` response shapes of `signal-cli-rest-api` are supported:
+the JSON object returned up to roughly 0.95 and the JSON list returned by newer
+releases (verified against 0.101). Any other shape fails the approval request
+and nothing is executed.
+
 ## Friendly account names in approval messages
 
 By default approval messages refer to accounts by the last 4 chars of their
