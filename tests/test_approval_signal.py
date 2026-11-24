@@ -498,11 +498,18 @@ async def _noop_receive_loop(self: SignalApprovalManager) -> None:
     return None
 
 
-def _mock_transport(captured: dict[str, Any], timestamp: int = 1727) -> httpx.MockTransport:
+_UNSET: Any = object()
+
+
+def _mock_transport(captured: dict[str, Any], timestamp: int = 1727, *, body: Any = _UNSET) -> httpx.MockTransport:
+    """Fake daemon. `body` overrides the default legacy ``{"timestamp": ...}``
+    object with an arbitrary /v2/send JSON response body."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         captured["url"] = str(request.url)
         captured["json"] = json.loads(request.content)
-        return httpx.Response(201, json={"timestamp": timestamp})
+        captured["posts"] = captured.get("posts", 0) + 1
+        return httpx.Response(201, json={"timestamp": timestamp} if body is _UNSET else body)
 
     return httpx.MockTransport(handler)
 
@@ -538,6 +545,135 @@ def test_send_posts_v2_send_payload(monkeypatch: pytest.MonkeyPatch) -> None:
         "message": "hello reviewers",
         "text_mode": "normal",
     }
+
+
+def _send_with_response(monkeypatch: pytest.MonkeyPatch, body: Any) -> int:
+    _patch_client_transport(monkeypatch, _mock_transport({}, body=body))
+    monkeypatch.setattr(SignalApprovalManager, "_receive_loop", _noop_receive_loop)
+    manager = SignalApprovalManager(_settings())
+
+    async def scenario() -> int:
+        await manager.start()
+        try:
+            return await manager._send("hello")
+        finally:
+            await manager.stop()
+
+    return await_result(scenario())
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"timestamp": "1764000000000"}, id="legacy-object-string"),
+        pytest.param({"timestamp": 1764000000000}, id="legacy-object-int"),
+        pytest.param([{"timestamp": "1764000000000"}], id="list-one-entry"),
+        pytest.param(
+            [{"timestamp": "1764000000000"}, {"timestamp": 1764000000000}, {"timestamp": "1764000000000"}],
+            id="list-identical-timestamps",
+        ),
+    ],
+)
+def test_send_accepts_object_and_list_responses(monkeypatch: pytest.MonkeyPatch, body: Any) -> None:
+    """signal-cli-rest-api <= ~0.95 returns an object, 0.101 a list with one
+    entry per send batch; both yield the sent message's timestamp."""
+    assert _send_with_response(monkeypatch, body) == 1764000000000
+
+
+_BAD_SEND_BODIES = [
+    pytest.param([], id="empty-list"),
+    pytest.param([{"timestamp": "1764000000000"}, {"timestamp": "1764000000001"}], id="differing-timestamps"),
+    pytest.param([{"timestamp": "1764000000000"}, {}], id="list-entry-missing-key"),
+    pytest.param([{"timestamp": "1764000000000"}, "1764000000000"], id="list-entry-not-object"),
+    pytest.param({}, id="object-missing-key"),
+    pytest.param([{"id": "1764000000000"}], id="list-missing-key"),
+    pytest.param({"timestamp": "soon"}, id="non-numeric"),
+    pytest.param([{"timestamp": "17640000.5"}], id="list-non-numeric"),
+    pytest.param({"timestamp": None}, id="null"),
+    pytest.param({"timestamp": True}, id="bool"),
+    pytest.param({"timestamp": 1764000000000.0}, id="float"),
+    pytest.param({"timestamp": "0"}, id="zero"),
+    pytest.param({"timestamp": -5}, id="negative"),
+    pytest.param("1764000000000", id="bare-string"),
+    pytest.param(None, id="json-null"),
+]
+
+
+@pytest.mark.parametrize("body", _BAD_SEND_BODIES)
+def test_send_fails_closed_on_unexpected_response(monkeypatch: pytest.MonkeyPatch, body: Any) -> None:
+    with pytest.raises(signal_mod.SignalSendError, match="Unexpected /v2/send response shape"):
+        _send_with_response(monkeypatch, body)
+
+
+def test_send_fails_closed_on_non_json_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = httpx.MockTransport(lambda request: httpx.Response(201, text="OK"))
+    _patch_client_transport(monkeypatch, transport)
+    monkeypatch.setattr(SignalApprovalManager, "_receive_loop", _noop_receive_loop)
+    manager = SignalApprovalManager(_settings())
+
+    async def scenario() -> None:
+        await manager.start()
+        try:
+            await manager._send("hello")
+        finally:
+            await manager.stop()
+
+    with pytest.raises(signal_mod.SignalSendError, match="not JSON"):
+        await_result(scenario())
+
+
+@pytest.mark.parametrize("body", _BAD_SEND_BODIES)
+def test_require_never_approves_on_unexpected_send_response(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, body: Any
+) -> None:
+    """An unusable /v2/send response fails the approval instead of guessing a
+    correlation key: require() raises, nothing stays pending, and an "ok"
+    reply quoting any timestamp in the response resolves nothing."""
+    captured: dict[str, Any] = {}
+    _patch_client_transport(monkeypatch, _mock_transport(captured, body=body))
+    monkeypatch.setattr(SignalApprovalManager, "_receive_loop", _noop_receive_loop)
+    manager = SignalApprovalManager(_settings(timeout_seconds=5.0))
+
+    async def scenario() -> None:
+        try:
+            await manager.require(_request())
+        finally:
+            assert manager._pending == {}
+            await manager._handle_envelope(_reply(1764000000000, "ok"))
+            await manager._handle_envelope(_reply(1764000000001, "ok"))
+            assert manager._pending == {}
+            await manager.stop()
+
+    with caplog.at_level("ERROR", logger=signal_mod.__name__), pytest.raises(signal_mod.SignalSendError):
+        await_result(scenario())
+
+    assert "Failing approval appr-1 for tool 'cancel_order'" in caplog.text
+    # The prompt plus one best-effort notice, whose own bad response is
+    # logged rather than raised.
+    assert captured["posts"] == 2
+    assert "Failed to post Signal notice" in caplog.text
+
+
+@pytest.mark.parametrize("body", [[], [{"timestamp": "soon"}], {}])
+def test_send_best_effort_survives_unexpected_response(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, body: Any
+) -> None:
+    captured: dict[str, Any] = {}
+    _patch_client_transport(monkeypatch, _mock_transport(captured, body=body))
+    monkeypatch.setattr(SignalApprovalManager, "_receive_loop", _noop_receive_loop)
+    manager = SignalApprovalManager(_settings())
+
+    async def scenario() -> None:
+        await manager.start()
+        await manager._send_best_effort("notice")
+        await manager.stop()
+
+    with caplog.at_level("ERROR", logger=signal_mod.__name__):
+        await_result(scenario())
+
+    assert captured["posts"] == 1
+    assert "Failed to post Signal notice" in caplog.text
+    assert "Unexpected /v2/send response shape" in caplog.text
 
 
 def test_send_before_start_raises() -> None:
@@ -622,6 +758,29 @@ def test_receive_loop_resolves_approval_from_websocket_frame(
 
     assert decision is ApprovalDecision.APPROVED
     assert fake_ws.connected_urls == [f"ws://127.0.0.1:8080/v1/receive/{_BOT_ACCOUNT}"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param([{"timestamp": "4242"}], id="one-entry"),
+        pytest.param([{"timestamp": "4242"}, {"timestamp": "4242"}], id="identical-entries"),
+    ],
+)
+def test_receive_loop_resolves_approval_with_list_send_response(monkeypatch: pytest.MonkeyPatch, body: Any) -> None:
+    """Same end-to-end path against the list-shaped /v2/send response of
+    signal-cli-rest-api 0.101: the reply's quote.id still finds the approval."""
+    _patch_client_transport(monkeypatch, _mock_transport({}, body=body))
+    manager = SignalApprovalManager(_settings(timeout_seconds=5.0))
+    fake_ws = _FakeWebsockets(manager, [json.dumps(_reply(4242, "ok"))])
+    monkeypatch.setattr(signal_mod, "_require_websockets", lambda: fake_ws)
+
+    async def scenario() -> ApprovalDecision:
+        decision = await manager.require(_request())
+        await manager.stop()
+        return decision
+
+    assert await_result(scenario()) is ApprovalDecision.APPROVED
 
 
 def test_receive_url_strips_trailing_slash(monkeypatch: pytest.MonkeyPatch) -> None:

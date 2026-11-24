@@ -58,6 +58,40 @@ _FOOTER = 'Reply "ok" to approve or "no" to deny.'
 _EMPTY_NAMES: Mapping[str, str] = MappingProxyType({})
 
 
+class SignalSendError(RuntimeError):
+    """POST /v2/send succeeded but its response carried no usable timestamp."""
+
+
+def _parse_timestamp(value: Any) -> int | None:
+    """Return a send timestamp given as a positive int or all-digit string, else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        return int(value) or None
+    return None
+
+
+def _extract_send_timestamp(payload: Any) -> int:
+    """Pull the sent message's timestamp out of a /v2/send response body.
+
+    signal-cli-rest-api up to roughly 0.95 answers with ``{"timestamp": "<ms>"}``;
+    newer releases (0.101) answer with a list holding one such object per send
+    batch (numbers, groups, usernames). The timestamp is the reply-correlation
+    key, so anything ambiguous or unrecognized raises instead of guessing.
+    """
+    entries = payload if isinstance(payload, list) else [payload]
+    timestamps = {_parse_timestamp(entry.get("timestamp")) if isinstance(entry, dict) else None for entry in entries}
+    timestamp = next(iter(timestamps)) if len(timestamps) == 1 else None
+    if timestamp is None:
+        raise SignalSendError(
+            "Unexpected /v2/send response shape from signal-cli-rest-api, cannot determine the message "
+            f"timestamp: {str(payload)[:200]!r}"
+        )
+    return timestamp
+
+
 @dataclass(slots=True, frozen=True)
 class SignalApprovalSettings:
     """Configuration values required for Signal approvals."""
@@ -154,7 +188,23 @@ class SignalApprovalManager(ApprovalManager):
             )
             return ApprovalDecision.DENIED
 
-        sent_timestamp = await self._send(body)
+        try:
+            sent_timestamp = await self._send(body)
+        except SignalSendError:
+            # The prompt may have reached the reviewer, but without its
+            # timestamp no reply can be matched to it. Fail the request.
+            logger.error(
+                "Failing approval %s for tool '%s': the Signal prompt's send timestamp is unknown, "
+                "so replies cannot be correlated.",
+                request.id,
+                request.tool_name,
+            )
+            await self._send_best_effort(
+                f"❌ schwab-mcp failed '{request.tool_name}' (approval {request.id}): "
+                f"unexpected reply from the Signal daemon, replies to the prompt cannot be correlated. "
+                f"Nothing was executed."
+            )
+            raise
         future: asyncio.Future[ApprovalDecision] = asyncio.get_running_loop().create_future()
         pending = _PendingApproval(request=request, future=future, sent_timestamp=sent_timestamp)
         async with self._lock:
@@ -211,12 +261,18 @@ class SignalApprovalManager(ApprovalManager):
             },
         )
         response.raise_for_status()
-        return int(response.json()["timestamp"])
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise SignalSendError(
+                f"Unexpected /v2/send response shape from signal-cli-rest-api, body is not JSON: {response.text[:200]!r}"
+            ) from exc
+        return _extract_send_timestamp(payload)
 
     async def _send_best_effort(self, body: str) -> None:
         try:
             await self._send(body)
-        except httpx.HTTPError:
+        except (httpx.HTTPError, SignalSendError):
             logger.exception("Failed to post Signal notice")
 
     async def _receive_loop(self) -> None:
